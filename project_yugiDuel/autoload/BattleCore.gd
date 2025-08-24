@@ -240,8 +240,7 @@ func _process_action(game_state, action):
 		"CHANGE_POSITION":
 			result = _action_change_position(game_state, player_id, action["payload"])
 		"ACTIVATE_EFFECT":
-			pass
-			# result = _action_activate_effect(game_state, player_id, action["payload"])
+			result = _action_activate_effect(game_state, player_id, action["payload"])
 		"DECLARE_ATTACK":
 			result = _action_declare_attack(game_state, player_id, action["payload"])
 		"END_PHASE":
@@ -463,56 +462,51 @@ func _action_change_position(game_state, player_id, payload):
 		]
 	}
 
-# func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx):
-# 	var effect = CardDatabase.get(card_id).get("effect", "")
-# 	var events = []
+# ===========================================================================
+# _action_activate_effect(game_state, player_id, payload)
+# Kích hoạt hiệu ứng của quái, spell, trap → thêm vào chain
+# ===========================================================================
+func _action_activate_effect(game_state, player_id, payload):
+    var card_id = payload["card_id"]
+    var zone_type = payload.get("zone_type", "spell_trap")
+    var player = game_state["players"][player_id]
+    
+    # Tìm vị trí
+    var zone_idx = -1
+    var zones = player["spell_trap_zones"] if zone_type == "spell_trap" else player["monster_zones"]
+    for i in range(5):
+        if zones[i] and zones[i].card_id == card_id:
+            zone_idx = i
+            break
+    if zone_idx == -1:
+        return _error(ERR_CARD_NOT_ON_FIELD)
 
-# 	match effect:
-# 		"draw_2":
-# 			var drawn = _draw_cards(player["deck"], 2)
-# 			player["hand"] += drawn
-# 			events.append({"type": "DRAW_EFFECT", "cards": drawn, "player": player["player_id"]})
-# 		"special_summon_graveyard":
-# 			if player["graveyard"].empty():
-# 				return _error("NO_CARDS_IN_GRAVEYARD")
-# 			var free_zone = _find_free_monster_zone(player)
-# 			if free_zone == -1:
-# 				return _error(ERR_ZONE_OCCUPIED)
-# 			var summon_card = player["graveyard"].pop_back()
-# 			player["monster_zones"][free_zone] = {
-# 				"card_id": summon_card,
-# 				"position": "face_up_attack",
-# 				"status": "summoned_this_turn",
-# 				"attacked_this_turn": false
-# 			}
-# 			events.append({"type": "SPECIAL_SUMMON", "card_id": summon_card, "zone": free_zone})
-# 		"destroy_all_monsters":
-# 			_destroy_all_monsters(player, opponent, events)
-# 		"destroy_all_attackers":
-# 			_destroy_all_attackers(opponent, events)
-# 		"destroy_summoned_monster":
-# 			_destroy_summoned_monster(opponent, events)
-# 		"reduce_atk_0":
-# 			if game_state["chain_trigger"] and game_state["chain_trigger"].type == "ATTACK_DECLARED":
-# 				var atk_zone = game_state["chain_trigger"].attacker_zone
-# 				var atk_player = game_state["players"][game_state["chain_trigger"].player_id]
-# 				if atk_player.monster_zones[atk_zone]:
-# 					var card_id_ = atk_player.monster_zones[atk_zone].card_id
-# 					atk_player.monster_zones[atk_zone].temp_atk = 0
-# 					events.append({
-# 						"type": "ATK_MODIFIED",
-# 						"card_id": card_id_,
-# 						"new_atk": 0
-# 					})
-# 		_:
-# 			return _error(ERR_NO_EFFECT)
+    # Kiểm tra điều kiện
+    if zone_type == "spell_trap" and zones[zone_idx].status != "face_up":
+        return _error("CARD_NOT_ACTIVATABLE")
+    if zone_type == "monster":
+        var card_data = CardDatabase.get(card_id)
+        if not card_data.has("effect") or card_data["effect"] == "":
+            return _error(ERR_NO_EFFECT)
+        # ✅ Kiểm tra: SUIJIN chỉ kích hoạt khi có tấn công
+        if card_id == "SUIJIN" and (not game_state["chain_trigger"] or game_state["chain_trigger"].get("type") != "ATTACK_DECLARED"):
+            return _error("EFFECT_CANNOT_ACTIVATE_NOW")
 
-# 	# Xóa spell/trap sau khi dùng (trừ continuous)
-# 	if (zone_type == "spell_trap") and not effect  in ["continuous_effect"]:
-# 		player["spell_trap_zones"][zone_idx] = null
-# 		player["graveyard"].append(card_id)
+    # Thêm vào chain
+    game_state["chain"].append({
+        "card_id": card_id,
+        "player_id": player_id,
+        "zone_type": zone_type,
+        "zone_idx": zone_idx
+    })
 
-# 	return {"success": true, "events": events}
+    return {
+        "success": true,
+        "events": [
+            {"type": "ACTIVATE_EFFECT", "card_id": card_id, "player": player_id}
+        ]
+    }
+
 
 func _action_declare_attack(game_state, player_id, payload):
 	var player = game_state["players"][player_id]
@@ -556,7 +550,9 @@ func _action_declare_attack(game_state, player_id, payload):
 			return _error(ERR_INVALID_TARGET)
 		var target = opponent["monster_zones"][target_zone]
 		var target_pos = target.position
-		var target_val = CardDatabase.get(target.card_id).get("def", 0) if target_pos.contains("defense") else CardDatabase.get(target.card_id).get("atk", 0)
+		# ✅ SỬA: Dùng find() thay vì contains()
+		var is_defense = target_pos.find("defense") != -1
+		var target_val = CardDatabase.get(target.card_id).get("def", 0) if is_defense else CardDatabase.get(target.card_id).get("atk", 0)
 
 		# Flip if face down
 		if target_pos == "face_down_defense":
@@ -565,7 +561,7 @@ func _action_declare_attack(game_state, player_id, payload):
 
 		if atk > target_val:
 			var damage = atk - target_val
-			if target_pos.contains("defense"):
+			if is_defense:
 				damage = 0
 			else:
 				opponent["life_points"] = max(0, opponent["life_points"] - damage)
@@ -573,7 +569,7 @@ func _action_declare_attack(game_state, player_id, payload):
 			opponent["graveyard"].append(target.card_id)
 			events.append({"type": "DESTROY_TARGET", "damage": damage})
 		elif atk == target_val:
-			if not target_pos.contains("defense"):
+			if not is_defense:
 				player["monster_zones"][atk_zone] = null
 				player["graveyard"].append(attacker.card_id)
 			opponent["monster_zones"][target_zone] = null
@@ -582,7 +578,7 @@ func _action_declare_attack(game_state, player_id, payload):
 		else:
 			var damage = target_val - atk
 			player["life_points"] = max(0, player["life_points"] - damage)
-			if not target_pos.contains("defense"):
+			if not is_defense:
 				player["monster_zones"][atk_zone] = null
 				player["graveyard"].append(attacker.card_id)
 			events.append({"type": "REBOUND", "damage": damage})
@@ -647,7 +643,7 @@ func _draw_cards(deck, count):
 func _can_activate_effect_out_of_turn(game_state, action):
 	if action["type"] != "ACTIVATE_EFFECT":
 		return false
-	var card_id = action["payload"].card_id
+	var card_id = action["payload"]["card_id"]
 	var card_data = CardDatabase.get(card_id)
 	return card_data.get("type") == "trap" or card_data.get("effect") in ["quick_effect"]  # Mở rộng sau
 
@@ -832,8 +828,9 @@ func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx)
 			events.append({"type": "DESTROY_ALL_MONSTERS"})
 		"destroy_all_attackers":
 			for i in range(5):
-				if opponent["monster_zones"][i] and opponent["monster_zones"][i].position.contains("attack"):
-					opponent["graveyard"].append(opponent["monster_zones"][i].card_id)
+				var zone = opponent["monster_zones"][i]
+				if zone and zone.position.find("attack") != -1:
+					opponent["graveyard"].append(zone.card_id)
 					opponent["monster_zones"][i] = null
 			events.append({"type": "DESTROY_MONSTERS", "player": opponent["player_id"]})
 		"destroy_summoned_monster":

@@ -51,70 +51,73 @@ func _ready():
 # _play_next_turn()
 # Xử lý lượt tiếp theo, gọi bot hoặc giả lập người chơi
 # ===========================================================================
+# ===========================================================================
+# _play_next_turn()
+# ✅ ĐÃ SỬA: Thêm vòng lặp cho bot để thực hiện nhiều hành động trong 1 lượt
+# ===========================================================================
 func _play_next_turn():
 	var state = BattleCore.get_game_state(room_id, human_player)
-	if state.empty():
-		print("❌ Lỗi: Không tìm thấy trận đấu %s" % room_id)
+	if state.empty() or state["status"] != "active":
+		print("🏁 Kết thúc trận.")
 		return
-	
-	if state["status"] != "active":
-		print("🏁 Trận đấu kết thúc! Người thắng: %s | Lý do: %s" % [state["winner"], state["win_reason"]])
-		return
-	
-	# In trạng thái hiện tại
+
 	_print_game_state(state)
-	
+
 	if state["turn"] == bot_player:
-		# Bot chơi
-		var bot_result = YugiBot.play_turn(room_id, bot_player)
-		if bot_result.success:
-			print("🤖 Bot action: %s" % bot_result.action_taken)
-			print("📈 Kết quả: %s" % bot_result.result["events"])
-		else:
-			print("❌ Bot thất bại: %s" % bot_result.result["errors"])
+		# 🔁 VÒNG LẶP: Cho phép bot thực hiện nhiều hành động
+		while true:
+			# Lấy trạng thái mới nhất
+			var current_state = BattleCore.get_game_state(room_id, bot_player)
+			if current_state.empty() or current_state["status"] != "active" or current_state["turn"] != bot_player:
+				break
+
+			var bot_result = YugiBot.play_turn(room_id, bot_player)
+			if bot_result.success:
+				print("🤖 Bot action: %s" % bot_result.action_taken)
+				print("📈 Kết quả: %s", bot_result.result["events"])
+			else:
+				print("❌ Bot thất bại: %s" % bot_result.result["errors"])
+				break
+
+			# ✅ THÊM DÒNG NÀY: Dừng 0.1s để tránh treo
+			yield(get_tree().create_timer(0.1), "timeout")
 	else:
-		# Giả lập người chơi
+		# 👤 Người chơi (giả lập)
 		var actions = BattleCore.get_available_actions(room_id, human_player)
 		var action = _simulate_human_action(state, human_player, actions)
 		var result = BattleCore.submit_action(room_id, action)
 		if result["success"]:
 			print("👤 Human action: %s" % action)
-			print("📈 Kết quả: %s" % result["events"])
+			print("📈 Kết quả: %s" , result["events"])
 		else:
 			print("❌ Human thất bại: %s" % result["errors"])
-	
-	# Tiếp tục lượt sau (với delay để dễ theo dõi)
+
+	# Chờ 1 giây rồi tiếp tục
 	yield(get_tree().create_timer(1.0), "timeout")
 	_play_next_turn()
-
 
 # ===========================================================================
 # _simulate_human_action(state, player_id, actions)
 # Giả lập hành động cho người chơi (dựa trên heuristic đơn giản)
 # ===========================================================================
 func _simulate_human_action(state, player_id, actions):
-	# Ưu tiên: Summon quái mạnh, activate spell mạnh, attack quái yếu
-	var best_action = {"type": "", "player_id": player_id, "payload": {}}
-	
-	# Ưu tiên 1: Activate spell mạnh
+	# Ưu tiên: Activate spell mạnh
 	for act in actions.details:
 		if act.type == "PLAY_SPELL":
 			var effect = CardDatabase.get(act.payload["card_id"]).get("effect", "")
 			if effect in ["draw_2", "special_summon_graveyard", "destroy_all_monsters"]:
-				return act
-	
+				return _with_player(act, player_id)  # ✅ Đã có player_id
 	# Ưu tiên 2: Summon quái có ATK cao nhất
 	var best_atk = -1
+	var best_action = null
 	for act in actions.details:
 		if act.type == "PLAY_MONSTER":
 			var atk = CardDatabase.get(act.payload["card_id"]).get("atk", 0)
 			if atk > best_atk:
 				best_atk = atk
 				best_action = act
-	
-	if best_action.type != "":
-		return best_action
-	
+	if best_action:
+		return _with_player(best_action, player_id)  # ✅
 	# Ưu tiên 3: Attack quái yếu nhất
 	if state["phase"] == "battle":
 		var opponent_id = _get_opponent_id(state)
@@ -129,28 +132,38 @@ func _simulate_human_action(state, player_id, actions):
 					weakest_zone = i
 		if weakest_zone != -1:
 			for act in actions.details:
-				if act.type == "DECLARE_ATTACK" and act.payload.has("target_zone") and act.payload["target_zone"] == weakest_zone:
-					return act
-	
-	# Ưu tiên 4: Direct attack
-	for act in actions.details:
-		if act.type == "DECLARE_ATTACK" and not act.payload.has("target_zone"):
-			return act
-	
-	# Ưu tiên 5: Set trap/spell
+				if act.type == "DECLARE_ATTACK" and act.payload["target_zone"] == weakest_zone:
+					return _with_player(act, player_id)  # ✅
+		# Direct attack
+		for act in actions.details:
+			if act.type == "DECLARE_ATTACK" and not act.payload.has("target_zone"):
+				return _with_player(act, player_id)  # ✅
+	# Ưu tiên 4: Set trap/spell
 	for act in actions.details:
 		if act.type in ["SET_TRAP", "SET_SPELL"]:
-			return act
-	
-	# Mặc định: End phase hoặc turn
+			return _with_player(act, player_id)  # ✅
+	# Ưu tiên 5: Set monster
+	for act in actions.details:
+		if act.type == "SET_MONSTER":
+			return _with_player(act, player_id)  # ✅
+	# Ưu tiên 6: END_PHASE hoặc END_TURN
+	if state["phase"] == "end":
+		for act in actions.details:
+			if act.type == "END_TURN":
+				return _with_player(act, player_id)  # ✅
+		return _with_player({"type": "END_TURN", "payload": {}}, player_id)  # ✅
 	for act in actions.details:
 		if act.type == "END_PHASE":
-			return act
+			return _with_player(act, player_id)  # ✅
 		if act.type == "END_TURN":
-			return act
-	
-	return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+			return _with_player(act, player_id)  # ✅
+	# Fallback
+	return _with_player({"type": "END_TURN", "payload": {}}, player_id)  # ✅
 
+func _with_player(action, player_id):
+	var new_action = action.duplicate()
+	new_action["player_id"] = player_id
+	return new_action
 
 # ===========================================================================
 # _print_game_state(state)
