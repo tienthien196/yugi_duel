@@ -16,7 +16,6 @@ const ERR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 const ERR_JSON_INVALID = "JSON_INVALID"
 const ERR_CARD_INVALID = "CARD_INVALID"
 const ERR_CARD_NOT_FOUND = "CARD_NOT_FOUND"
-const PATH_CARDS = "res://data/cards.json"
 
 # ===========================================================================
 # _ready()
@@ -24,7 +23,7 @@ const PATH_CARDS = "res://data/cards.json"
 # ===========================================================================
 func _ready():
 	randomize()  # Cần cho randi()
-	var error = _load_cards(PATH_CARDS)
+	var error = _load_cards("res://data/cards.json")
 	if error:
 		emit_signal("card_database_error", error[0], error[1])
 		push_error("❌ CardDatabase: Không thể nạp cards.json - %s" % error[1])
@@ -66,7 +65,6 @@ func _load_cards(path):
 		var card = data[card_id]
 		var error = _validate_card(card_id, card)
 		if error:
-			print("card ko hop le: %s | %s"% [card_id, error])
 			emit_signal("card_database_error", ERR_CARD_INVALID, "Card %s không hợp lệ: %s" % [card_id, error])
 			continue
 		cards[card_id] = card
@@ -79,49 +77,25 @@ func _load_cards(path):
 # Kiểm tra dữ liệu lá bài hợp lệ
 # Trả về null nếu ok, hoặc string mô tả lỗi
 # ===========================================================================
-
-#json parse trả về type_real ko phải type INT
 func _validate_card(card_id, card):
 	if not card is Dictionary:
 		return "Không phải dictionary"
-
-	# Tự động điền ID nếu thiếu
 	if not card.has("id") or card["id"] != card_id:
-		card["id"] = card_id  # Tự sửa
-
+		card["id"] = card_id  # Tự điền
 	if not card.has("name"):
 		push_warning("Card %s thiếu 'name'" % card_id)
 		card["name"] = card_id
-
-	if not card.has("type") or not card["type"]  in ["monster", "spell", "trap"]:
+	if not card.has("type") or not card["type"] in ["monster", "spell", "trap"]:
 		return "Thiếu hoặc type không hợp lệ: %s" % card.get("type", "missing")
-
 	if card["type"] == "monster":
-		# Kiểm tra atk
-		if not card.has("atk"):
-			return "Monster thiếu atk"
-		var atk = card["atk"]
-		if typeof(atk) != TYPE_INT and typeof(atk) != TYPE_REAL:
-			return "atk phải là số (hiện tại: %s, kiểu: %s)" % [str(atk), typeof(atk)]
-		if int(atk) < 0:
-			return "atk không được âm"
-		card["atk"] = int(atk)
-
-		# Kiểm tra def
-		if not card.has("def"):
-			return "Monster thiếu def"
-		var def_val = card["def"]
-		if typeof(def_val) != TYPE_INT and typeof(def_val) != TYPE_REAL:
-			return "def phải là số"
-		if int(def_val) < 0:
-			return "def không được âm"
-		card["def"] = int(def_val)
-
+		if not card.has("atk") or typeof(card["atk"]) != TYPE_INT or card["atk"] < 0:
+			return "Monster thiếu hoặc atk không hợp lệ"
+		if not card.has("def") or typeof(card["def"]) != TYPE_INT or card["def"] < 0:
+			return "Monster thiếu hoặc def không hợp lệ"
 	if card["type"] in ["spell", "trap"]:
 		if not card.has("effect"):
 			push_warning("Card %s thiếu 'effect'" % card_id)
 			card["effect"] = ""
-
 	return null
 
 
@@ -197,5 +171,5 @@ func get_random_card(type=null):
 func get_all():
 	return cards.duplicate(true)
 
-
+================================================================================
 

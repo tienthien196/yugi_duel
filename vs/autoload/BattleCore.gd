@@ -240,8 +240,7 @@ func _process_action(game_state, action):
 		"CHANGE_POSITION":
 			result = _action_change_position(game_state, player_id, action["payload"])
 		"ACTIVATE_EFFECT":
-			pass
-			# result = _action_activate_effect(game_state, player_id, action["payload"])
+			result = _action_activate_effect(game_state, player_id, action["payload"])
 		"DECLARE_ATTACK":
 			result = _action_declare_attack(game_state, player_id, action["payload"])
 		"END_PHASE":
@@ -463,56 +462,56 @@ func _action_change_position(game_state, player_id, payload):
 		]
 	}
 
-# func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx):
-# 	var effect = CardDatabase.get(card_id).get("effect", "")
-# 	var events = []
+func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx):
+	var effect = CardDatabase.get(card_id).get("effect", "")
+	var events = []
 
-# 	match effect:
-# 		"draw_2":
-# 			var drawn = _draw_cards(player["deck"], 2)
-# 			player["hand"] += drawn
-# 			events.append({"type": "DRAW_EFFECT", "cards": drawn, "player": player["player_id"]})
-# 		"special_summon_graveyard":
-# 			if player["graveyard"].empty():
-# 				return _error("NO_CARDS_IN_GRAVEYARD")
-# 			var free_zone = _find_free_monster_zone(player)
-# 			if free_zone == -1:
-# 				return _error(ERR_ZONE_OCCUPIED)
-# 			var summon_card = player["graveyard"].pop_back()
-# 			player["monster_zones"][free_zone] = {
-# 				"card_id": summon_card,
-# 				"position": "face_up_attack",
-# 				"status": "summoned_this_turn",
-# 				"attacked_this_turn": false
-# 			}
-# 			events.append({"type": "SPECIAL_SUMMON", "card_id": summon_card, "zone": free_zone})
-# 		"destroy_all_monsters":
-# 			_destroy_all_monsters(player, opponent, events)
-# 		"destroy_all_attackers":
-# 			_destroy_all_attackers(opponent, events)
-# 		"destroy_summoned_monster":
-# 			_destroy_summoned_monster(opponent, events)
-# 		"reduce_atk_0":
-# 			if game_state["chain_trigger"] and game_state["chain_trigger"].type == "ATTACK_DECLARED":
-# 				var atk_zone = game_state["chain_trigger"].attacker_zone
-# 				var atk_player = game_state["players"][game_state["chain_trigger"].player_id]
-# 				if atk_player.monster_zones[atk_zone]:
-# 					var card_id_ = atk_player.monster_zones[atk_zone].card_id
-# 					atk_player.monster_zones[atk_zone].temp_atk = 0
-# 					events.append({
-# 						"type": "ATK_MODIFIED",
-# 						"card_id": card_id_,
-# 						"new_atk": 0
-# 					})
-# 		_:
-# 			return _error(ERR_NO_EFFECT)
+	match effect:
+		"draw_2":
+			var drawn = _draw_cards(player["deck"], 2)
+			player["hand"] += drawn
+			events.append({"type": "DRAW_EFFECT", "cards": drawn, "player": player["player_id"]})
+		"special_summon_graveyard":
+			if player["graveyard"].empty():
+				return _error("NO_CARDS_IN_GRAVEYARD")
+			var free_zone = _find_free_monster_zone(player)
+			if free_zone == -1:
+				return _error(ERR_ZONE_OCCUPIED)
+			var summon_card = player["graveyard"].pop_back()
+			player["monster_zones"][free_zone] = {
+				"card_id": summon_card,
+				"position": "face_up_attack",
+				"status": "summoned_this_turn",
+				"attacked_this_turn": false
+			}
+			events.append({"type": "SPECIAL_SUMMON", "card_id": summon_card, "zone": free_zone})
+		"destroy_all_monsters":
+			_destroy_all_monsters(player, opponent, events)
+		"destroy_all_attackers":
+			_destroy_all_attackers(opponent, events)
+		"destroy_summoned_monster":
+			_destroy_summoned_monster(opponent, events)
+		"reduce_atk_0":
+			if game_state["chain_trigger"] and game_state["chain_trigger"].type == "ATTACK_DECLARED":
+				var atk_zone = game_state["chain_trigger"].attacker_zone
+				var atk_player = game_state["players"][game_state["chain_trigger"].player_id]
+				if atk_player.monster_zones[atk_zone]:
+					var card_id = atk_player.monster_zones[atk_zone].card_id
+					atk_player.monster_zones[atk_zone].temp_atk = 0
+					events.append({
+						"type": "ATK_MODIFIED",
+						"card_id": card_id,
+						"new_atk": 0
+					})
+		_:
+			return _error(ERR_NO_EFFECT)
 
-# 	# Xóa spell/trap sau khi dùng (trừ continuous)
-# 	if (zone_type == "spell_trap") and not effect  in ["continuous_effect"]:
-# 		player["spell_trap_zones"][zone_idx] = null
-# 		player["graveyard"].append(card_id)
+	# Xóa spell/trap sau khi dùng (trừ continuous)
+	if zone_type == "spell_trap" and effect not in ["continuous_effect"]:
+		player["spell_trap_zones"][zone_idx] = null
+		player["graveyard"].append(card_id)
 
-# 	return {"success": true, "events": events}
+	return {"success": true, "events": events}
 
 func _action_declare_attack(game_state, player_id, payload):
 	var player = game_state["players"][player_id]
@@ -896,5 +895,5 @@ func _error(reason):
 		"available_actions": []
 	}
 
-
+================================================================================
 

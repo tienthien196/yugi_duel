@@ -202,5 +202,5 @@ func _recently_lost_battle_due_to(card_id):
 	# Có thể lưu log trận thua
 	return false  # Tạm thời
 
-
+================================================================================
 

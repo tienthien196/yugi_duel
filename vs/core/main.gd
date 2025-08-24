@@ -38,7 +38,7 @@ func _ready():
 		"max_hand_size": 6,
 		"forbidden_cards": []
 	})
-	print("this is room", room_id)
+	print(room_id)
 	if room_id == "":
 		print("❌ Lỗi: Không thể tạo trận đấu!")
 		return
@@ -171,7 +171,7 @@ func _print_game_state(state):
 		if player["spell_trap_zones"][i]:
 			var card = CardDatabase.get(player["spell_trap_zones"][i].card_id)
 			print("  Spell/Trap zone %d: %s (%s)" % [i, card["name"], player["spell_trap_zones"][i].status])
-	print("Đối thủ %s: LP=%d, Hand=%d, Deck=%d" % [opponent_id, opponent["life_points"], len(opponent["hand"]), len(opponent["deck"])])
+	print("Đối thủ %s: LP=%d, Hand=%d, Deck=%d" % [opponent_id, opponent["life_points"], opponent["hand_count"], len(opponent["deck"])])
 	for i in range(5):
 		if opponent["monster_zones"][i]:
 			var card = CardDatabase.get(opponent["monster_zones"][i].card_id)
@@ -196,5 +196,5 @@ func _get_opponent_id(state):
 			return pid
 	return null
 
-
+================================================================================
 

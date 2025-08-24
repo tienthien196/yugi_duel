@@ -35,6 +35,7 @@ config/icon="res://icon.png"
 BattleCore="*res://autoload/BattleCore.gd"
 CardDatabase="*res://autoload/CardDatabase.gd"
 Agent="*res://autoload/agent.gd"
+YugiBot="*res://autoload/YugiBot.gd"
 
 [gui]
 
