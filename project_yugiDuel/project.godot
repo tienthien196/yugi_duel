@@ -1,0 +1,49 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=4
+
+_global_script_classes=[ {
+"base": "Reference",
+"class": "GameState",
+"language": "GDScript",
+"path": "res://core/types/GameState.gd"
+}, {
+"base": "Reference",
+"class": "PlayerState",
+"language": "GDScript",
+"path": "res://core/types/PlayerState.gd"
+} ]
+_global_script_class_icons={
+"GameState": "",
+"PlayerState": ""
+}
+
+[application]
+
+config/name="project_yugiDuel"
+run/main_scene="res://core/main.tscn"
+config/icon="res://icon.png"
+
+[autoload]
+
+BattleCore="*res://autoload/BattleCore.gd"
+CardDatabase="*res://autoload/CardDatabase.gd"
+Agent="*res://autoload/agent.gd"
+
+[gui]
+
+common/drop_mouse_on_gui_input_disabled=true
+
+[physics]
+
+common/enable_pause_aware_picking=true
+
+[rendering]
+
+environment/default_environment="res://default_env.tres"

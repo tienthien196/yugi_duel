@@ -1,0 +1,82 @@
+{
+  "BLUE_EYES_WHITE_DRAGON": {
+    "id": "BLUE_EYES_WHITE_DRAGON",
+    "name": "Blue-Eyes White Dragon",
+    "type": "monster",
+    "atk": 3000,
+    "def": 2500,
+    "level": 8,
+    "attribute": "light",
+    "effect": ""
+  },
+  "DARK_MAGICIAN": {
+    "id": "DARK_MAGICIAN",
+    "name": "Dark Magician",
+    "type": "monster",
+    "atk": 2500,
+    "def": 2100,
+    "level": 7,
+    "attribute": "dark",
+    "effect": ""
+  },
+  "GYOUKI": {
+    "id": "GYOUKI",
+    "name": "Gyouki",
+    "type": "monster",
+    "atk": 1800,
+    "def": 1500,
+    "level": 4,
+    "attribute": "dark",
+    "effect": ""
+  },
+  "SUIJIN": {
+    "id": "SUIJIN",
+    "name": "Suijin",
+    "type": "monster",
+    "atk": 2500,
+    "def": 2400,
+    "level": 7,
+    "attribute": "water",
+    "effect": "reduce_atk_0"
+  },
+  "SUMMONED_SKULL": {
+    "id": "SUMMONED_SKULL",
+    "name": "Summoned Skull",
+    "type": "monster",
+    "atk": 2500,
+    "def": 1200,
+    "level": 6,
+    "attribute": "dark",
+    "effect": ""
+  },
+  "POT_OF_GREED": {
+    "id": "POT_OF_GREED",
+    "name": "Pot of Greed",
+    "type": "spell",
+    "effect": "draw_2"
+  },
+  "MONSTER_REBORN": {
+    "id": "MONSTER_REBORN",
+    "name": "Monster Reborn",
+    "type": "spell",
+    "effect": "special_summon_graveyard"
+  },
+  "DARK_HOLE": {
+    "id": "DARK_HOLE",
+    "name": "Dark Hole",
+    "type": "spell",
+    "effect": "destroy_all_monsters"
+  },
+  "MIRROR_FORCE": {
+    "id": "MIRROR_FORCE",
+    "name": "Mirror Force",
+    "type": "trap",
+    "effect": "destroy_all_attackers"
+  },
+  "TRAP_HOLE": {
+    "id": "TRAP_HOLE",
+    "name": "Trap Hole",
+    "type": "trap",
+    "effect": "destroy_summoned_monster"
+  }
+}
