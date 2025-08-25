@@ -36,6 +36,10 @@ BattleCore="*res://autoload/BattleCore.gd"
 CardDatabase="*res://autoload/CardDatabase.gd"
 Agent="*res://autoload/agent.gd"
 YugiBot="*res://autoload/YugiBot.gd"
+NetworkManager="*res://autoload/NetworkManager.gd"
+AuthManager="*res://autoload/AuthManager.gd"
+DatabaseManager="*res://autoload/DatabaseManager.gd"
+GameManager="*res://autoload/GameManager.gd"
 
 [gui]
 

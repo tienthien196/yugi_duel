@@ -2,6 +2,80 @@
 Chỉ dump các file: .afinn, .c, .cfg, .conf, .cpp, .css, .gd, .go, .h, .hpp, .html, .ini, .java, .js, .json, .lark, .py, .rs, .toml, .ts, .yaml, .yml
 ================================================================================
 
+--- FILE: main.py ---
+# dump_code.py
+import os
+
+# Cấu hình
+ROOT_DIR = r"E:\GODOT\yugi_duel\project_yugiDuel"
+OUTPUT_FILE = r"E:\GODOT\yugi_duel\project_yugiDuel\out.txt"
+
+# Các đuôi file cần dump (có thể mở rộng)
+EXTENSIONS = {
+    '.py', '.lark', '.afinn', 
+    '.json', '.yaml', '.yml', '.toml',
+    '.ini', '.cfg', '.conf',
+    '.html', '.css', '.js', '.ts',
+    '.c', '.cpp', '.h', '.hpp', '.go', '.java', '.rs', '.gd'
+}
+
+# Các thư mục nên bỏ qua
+SKIP_DIRS = {
+    '__pycache__', '.git', 'node_modules', '.vscode', '.idea', 'venv', 'env', 'v3.1', 'tool'
+}
+
+def should_include_file(filepath):
+    """Kiểm tra file có nên được dump không"""
+    _, ext = os.path.splitext(filepath)
+    return ext.lower() in EXTENSIONS
+
+def is_binary(filepath):
+    """Kiểm tra file có phải binary không"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            f.read(1024)
+        return False
+    except UnicodeDecodeError:
+        return True
+    except Exception:
+        return True  # nếu lỗi, bỏ qua
+
+def dump_code():
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as out:
+        out.write(f"=== DUMP CODE TỪ: {ROOT_DIR} ===\n")
+        out.write(f"Chỉ dump các file: {', '.join(sorted(EXTENSIONS))}\n")
+        out.write("=" * 80 + "\n\n")
+
+        for root, dirs, files in os.walk(ROOT_DIR):
+            # Lọc các thư mục cần bỏ qua
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+            for file in files:
+                filepath = os.path.join(root, file)
+                relpath = os.path.relpath(filepath, ROOT_DIR)
+
+                if should_include_file(filepath):
+                    if is_binary(filepath):
+                        print(f"[SKIP] Binary file: {relpath}")
+                        continue
+
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        out.write(f"--- FILE: {relpath} ---\n")
+                        out.write(content)
+                        out.write("\n" + "="*80 + "\n\n")
+                        print(f"[OK] Dumped: {relpath}")
+                    except Exception as e:
+                        print(f"[ERROR] Đọc file {relpath} thất bại: {e}")
+                        out.write(f"[ERROR] Không thể đọc file: {relpath}\n\n")
+
+    print(f"\n✅ Đã xuất toàn bộ code vào: {OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    dump_code()
+================================================================================
+
 --- FILE: autoload\agent.gd ---
 # ===========================================================================
 # Agent.gd - CẬP NHẬT: Học từ EVENTS và CHAIN (không chỉ state/action)
@@ -455,8 +529,7 @@ func _process_action(game_state, action):
 		"CHANGE_POSITION":
 			result = _action_change_position(game_state, player_id, action["payload"])
 		"ACTIVATE_EFFECT":
-			pass
-			# result = _action_activate_effect(game_state, player_id, action["payload"])
+			result = _action_activate_effect(game_state, player_id, action["payload"])
 		"DECLARE_ATTACK":
 			result = _action_declare_attack(game_state, player_id, action["payload"])
 		"END_PHASE":
@@ -678,56 +751,51 @@ func _action_change_position(game_state, player_id, payload):
 		]
 	}
 
-# func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx):
-# 	var effect = CardDatabase.get(card_id).get("effect", "")
-# 	var events = []
+# ===========================================================================
+# _action_activate_effect(game_state, player_id, payload)
+# Kích hoạt hiệu ứng của quái, spell, trap → thêm vào chain
+# ===========================================================================
+func _action_activate_effect(game_state, player_id, payload):
+	var card_id = payload["card_id"]
+	var zone_type = payload.get("zone_type", "spell_trap")
+	var player = game_state["players"][player_id]
+	
+	# Tìm vị trí
+	var zone_idx = -1
+	var zones = player["spell_trap_zones"] if zone_type == "spell_trap" else player["monster_zones"]
+	for i in range(5):
+		if zones[i] and zones[i].card_id == card_id:
+			zone_idx = i
+			break
+	if zone_idx == -1:
+		return _error(ERR_CARD_NOT_ON_FIELD)
 
-# 	match effect:
-# 		"draw_2":
-# 			var drawn = _draw_cards(player["deck"], 2)
-# 			player["hand"] += drawn
-# 			events.append({"type": "DRAW_EFFECT", "cards": drawn, "player": player["player_id"]})
-# 		"special_summon_graveyard":
-# 			if player["graveyard"].empty():
-# 				return _error("NO_CARDS_IN_GRAVEYARD")
-# 			var free_zone = _find_free_monster_zone(player)
-# 			if free_zone == -1:
-# 				return _error(ERR_ZONE_OCCUPIED)
-# 			var summon_card = player["graveyard"].pop_back()
-# 			player["monster_zones"][free_zone] = {
-# 				"card_id": summon_card,
-# 				"position": "face_up_attack",
-# 				"status": "summoned_this_turn",
-# 				"attacked_this_turn": false
-# 			}
-# 			events.append({"type": "SPECIAL_SUMMON", "card_id": summon_card, "zone": free_zone})
-# 		"destroy_all_monsters":
-# 			_destroy_all_monsters(player, opponent, events)
-# 		"destroy_all_attackers":
-# 			_destroy_all_attackers(opponent, events)
-# 		"destroy_summoned_monster":
-# 			_destroy_summoned_monster(opponent, events)
-# 		"reduce_atk_0":
-# 			if game_state["chain_trigger"] and game_state["chain_trigger"].type == "ATTACK_DECLARED":
-# 				var atk_zone = game_state["chain_trigger"].attacker_zone
-# 				var atk_player = game_state["players"][game_state["chain_trigger"].player_id]
-# 				if atk_player.monster_zones[atk_zone]:
-# 					var card_id_ = atk_player.monster_zones[atk_zone].card_id
-# 					atk_player.monster_zones[atk_zone].temp_atk = 0
-# 					events.append({
-# 						"type": "ATK_MODIFIED",
-# 						"card_id": card_id_,
-# 						"new_atk": 0
-# 					})
-# 		_:
-# 			return _error(ERR_NO_EFFECT)
+	# Kiểm tra điều kiện
+	if zone_type == "spell_trap" and zones[zone_idx].status != "face_up":
+		return _error("CARD_NOT_ACTIVATABLE")
+	if zone_type == "monster":
+		var card_data = CardDatabase.get(card_id)
+		if not card_data.has("effect") or card_data["effect"] == "":
+			return _error(ERR_NO_EFFECT)
+		# ✅ Kiểm tra: SUIJIN chỉ kích hoạt khi có tấn công
+		if card_id == "SUIJIN" and (not game_state["chain_trigger"] or game_state["chain_trigger"].get("type") != "ATTACK_DECLARED"):
+			return _error("EFFECT_CANNOT_ACTIVATE_NOW")
 
-# 	# Xóa spell/trap sau khi dùng (trừ continuous)
-# 	if (zone_type == "spell_trap") and not effect  in ["continuous_effect"]:
-# 		player["spell_trap_zones"][zone_idx] = null
-# 		player["graveyard"].append(card_id)
+	# Thêm vào chain
+	game_state["chain"].append({
+		"card_id": card_id,
+		"player_id": player_id,
+		"zone_type": zone_type,
+		"zone_idx": zone_idx
+	})
 
-# 	return {"success": true, "events": events}
+	return {
+		"success": true,
+		"events": [
+			{"type": "ACTIVATE_EFFECT", "card_id": card_id, "player": player_id}
+		]
+	}
+
 
 func _action_declare_attack(game_state, player_id, payload):
 	var player = game_state["players"][player_id]
@@ -771,7 +839,9 @@ func _action_declare_attack(game_state, player_id, payload):
 			return _error(ERR_INVALID_TARGET)
 		var target = opponent["monster_zones"][target_zone]
 		var target_pos = target.position
-		var target_val = CardDatabase.get(target.card_id).get("def", 0) if target_pos.contains("defense") else CardDatabase.get(target.card_id).get("atk", 0)
+		# ✅ SỬA: Dùng find() thay vì contains()
+		var is_defense = target_pos.find("defense") != -1
+		var target_val = CardDatabase.get(target.card_id).get("def", 0) if is_defense else CardDatabase.get(target.card_id).get("atk", 0)
 
 		# Flip if face down
 		if target_pos == "face_down_defense":
@@ -780,7 +850,7 @@ func _action_declare_attack(game_state, player_id, payload):
 
 		if atk > target_val:
 			var damage = atk - target_val
-			if target_pos.contains("defense"):
+			if is_defense:
 				damage = 0
 			else:
 				opponent["life_points"] = max(0, opponent["life_points"] - damage)
@@ -788,7 +858,7 @@ func _action_declare_attack(game_state, player_id, payload):
 			opponent["graveyard"].append(target.card_id)
 			events.append({"type": "DESTROY_TARGET", "damage": damage})
 		elif atk == target_val:
-			if not target_pos.contains("defense"):
+			if not is_defense:
 				player["monster_zones"][atk_zone] = null
 				player["graveyard"].append(attacker.card_id)
 			opponent["monster_zones"][target_zone] = null
@@ -797,7 +867,7 @@ func _action_declare_attack(game_state, player_id, payload):
 		else:
 			var damage = target_val - atk
 			player["life_points"] = max(0, player["life_points"] - damage)
-			if not target_pos.contains("defense"):
+			if not is_defense:
 				player["monster_zones"][atk_zone] = null
 				player["graveyard"].append(attacker.card_id)
 			events.append({"type": "REBOUND", "damage": damage})
@@ -862,7 +932,7 @@ func _draw_cards(deck, count):
 func _can_activate_effect_out_of_turn(game_state, action):
 	if action["type"] != "ACTIVATE_EFFECT":
 		return false
-	var card_id = action["payload"].card_id
+	var card_id = action["payload"]["card_id"]
 	var card_data = CardDatabase.get(card_id)
 	return card_data.get("type") == "trap" or card_data.get("effect") in ["quick_effect"]  # Mở rộng sau
 
@@ -1047,8 +1117,9 @@ func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx)
 			events.append({"type": "DESTROY_ALL_MONSTERS"})
 		"destroy_all_attackers":
 			for i in range(5):
-				if opponent["monster_zones"][i] and opponent["monster_zones"][i].position.contains("attack"):
-					opponent["graveyard"].append(opponent["monster_zones"][i].card_id)
+				var zone = opponent["monster_zones"][i]
+				if zone and zone.position.find("attack") != -1:
+					opponent["graveyard"].append(zone.card_id)
 					opponent["monster_zones"][i] = null
 			events.append({"type": "DESTROY_MONSTERS", "player": opponent["player_id"]})
 		"destroy_summoned_monster":
@@ -1327,7 +1398,6 @@ func get_all():
 # Autoload Singleton - Tự động chọn và thực hiện hành động dựa trên heuristic
 # Không cần UI, không cần mạng, tích hợp với BattleCore và CardDatabase
 # ===========================================================================
-
 extends Node
 
 # ===========================================================================
@@ -1339,118 +1409,126 @@ func play_turn(room_id, player_id):
 	var state = BattleCore.get_game_state(room_id, player_id)
 	if state.empty():
 		return {"success": false, "action_taken": {}, "result": {"errors": ["ROOM_NOT_FOUND"]}}
-	
 	if state["status"] != "active" or state["turn"] != player_id:
 		return {"success": false, "action_taken": {}, "result": {"errors": ["NOT_YOUR_TURN"]}}
-	
 	var actions = BattleCore.get_available_actions(room_id, player_id)
 	var action = _choose_action(state, player_id, actions)
-	
 	if action["type"] == "":
 		return {"success": false, "action_taken": {}, "result": {"errors": ["NO_ACTION_CHOSEN"]}}
-	
 	var result = BattleCore.submit_action(room_id, action)
 	return {"success": result["success"], "action_taken": action, "result": result}
-
 
 # ===========================================================================
 # _choose_action(state, player_id, actions)
 # Chọn hành động tối ưu dựa trên heuristic
-# Trả về: Dictionary {type, player_id, payload}
+# ✅ ĐÃ SỬA: Ưu tiên END_TURN khi ở phase "end"
 # ===========================================================================
 func _choose_action(state, player_id, actions):
 	var phase = state["phase"]
-	var player = state["players"][player_id]
-	var opponent_id = _get_opponent_id(state)
-	var opponent = state["players"][opponent_id]
-	
-	var action = {"type": "", "player_id": player_id, "payload": {}}
-	
+	var action_details = actions.details
+
 	# Xử lý chain trước (nếu có)
 	if not state["chain"].empty():
-		var trap_action = _choose_trap_action(state, player_id, actions.details)
+		var trap_action = _choose_trap_action(state, player_id, action_details)
 		if trap_action.type != "":
+			trap_action["player_id"] = player_id
 			return trap_action
-	
+
 	# Xử lý theo phase
 	if phase == "draw" and "DRAW_CARD" in actions.types:
 		return {"type": "DRAW_CARD", "player_id": player_id, "payload": {}}
-	
+
 	if phase in ["main1", "main2"]:
-		var main_action = _choose_main_phase_action(state, player_id, actions.details)
+		var main_action = _choose_main_phase_action(state, player_id, action_details)
 		if main_action.type != "":
+			main_action["player_id"] = player_id
 			return main_action
-	
+
 	if phase == "battle":
-		var attack_action = _choose_attack_action(state, player_id, actions.details)
+		var attack_action = _choose_attack_action(state, player_id, action_details)
 		if attack_action.type != "":
+			attack_action["player_id"] = player_id
 			return attack_action
-	
-	# Nếu không có hành động tối ưu, end phase hoặc turn
+
+	# 🟢 Ưu tiên END_TURN nếu đang ở phase "end"
+	if phase == "end":
+		if "END_TURN" in actions.types:
+			return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+		elif "END_PHASE" in actions.types:
+			return {"type": "END_PHASE", "player_id": player_id, "payload": {}}
+		else:
+			return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+
+	# Nếu không phải end phase, thì END_PHASE
 	if "END_PHASE" in actions.types:
 		return {"type": "END_PHASE", "player_id": player_id, "payload": {}}
 	if "END_TURN" in actions.types:
 		return {"type": "END_TURN", "player_id": player_id, "payload": {}}
-	
-	return action
 
+	return {"type": "", "player_id": player_id, "payload": {}}
 
 # ===========================================================================
 # _choose_main_phase_action(state, player_id, action_details)
 # Chọn hành động trong main phase (summon, spell, trap)
 # ===========================================================================
 func _choose_main_phase_action(state, player_id, action_details):
-	var player = state["players"][player_id]
-	var action = {"type": "", "player_id": player_id, "payload": {}}
-	
 	# Ưu tiên 1: Activate spell có effect mạnh (Pot of Greed, Monster Reborn, Dark Hole)
 	for act in action_details:
 		if act.type == "PLAY_SPELL":
 			var card_id = act.payload["card_id"]
 			var effect = CardDatabase.get(card_id).get("effect", "")
 			if effect in ["draw_2", "special_summon_graveyard", "destroy_all_monsters"]:
-				return act
-	
+				var action = act.duplicate()
+				action["player_id"] = player_id
+				return action
+
 	# Ưu tiên 2: Summon quái có ATK cao nhất
-	var best_monster = null
 	var best_atk = -1
-	var monster_action = null
+	var best_action = null
 	for act in action_details:
 		if act.type == "PLAY_MONSTER":
 			var card_id = act.payload["card_id"]
 			var atk = CardDatabase.get(card_id).get("atk", 0)
 			if atk > best_atk:
 				best_atk = atk
-				best_monster = card_id
-				monster_action = act
-	if monster_action:
-		return monster_action
-	
+				best_action = act
+	if best_action:
+		var action = best_action.duplicate()
+		action["player_id"] = player_id
+		return action
+
 	# Ưu tiên 3: Set trap
 	for act in action_details:
 		if act.type == "SET_TRAP":
-			return act
-	
+			var action = act.duplicate()
+			action["player_id"] = player_id
+			return action
+
 	# Ưu tiên 4: Set spell
 	for act in action_details:
 		if act.type == "SET_SPELL":
-			return act
-	
+			var action = act.duplicate()
+			action["player_id"] = player_id
+			return action
+
 	# Ưu tiên 5: Set monster nếu không summon được
 	for act in action_details:
 		if act.type == "SET_MONSTER":
-			return act
-	
-	# Ưu tiên 6: Activate effect trên sân
-	for act in action_details:
-		if act.type == "ACTIVATE_EFFECT":
-			var card_id = act.payload["card_id"]
-			var effect = CardDatabase.get(card_id).get("effect", "")
-			if effect != "":
-				return act
-	
-	return action
+			var action = act.duplicate()
+			action["player_id"] = player_id
+			return action
 
+	# # Ưu tiên 6: Activate effect trên sân
+	# for act in action_details:
+	# 	if act.type == "ACTIVATE_EFFECT":
+	# 		var card_id = act.payload["card_id"]
+	# 		var effect = CardDatabase.get(card_id).get("effect", "")
+	# 		if effect != "":
+	# 			var action = act.duplicate()
+	# 			action["player_id"] = player_id
+	# 			return action
+
+	return {"type": "", "player_id": player_id, "payload": {}}
 
 # ===========================================================================
 # _choose_attack_action(state, player_id, action_details)
@@ -1460,22 +1538,21 @@ func _choose_attack_action(state, player_id, action_details):
 	var player = state["players"][player_id]
 	var opponent_id = _get_opponent_id(state)
 	var opponent = state["players"][opponent_id]
-	var action = {"type": "", "player_id": player_id, "payload": {}}
-	
-	# Tìm quái mạnh nhất của mình
+
+	# Tìm quái mạnh nhất của mình chưa tấn công
 	var best_atk = -1
 	var best_atk_zone = -1
 	for i in range(5):
-		if player["monster_zones"][i] and player["monster_zones"][i].position == "face_up_attack" and not player["monster_zones"][i].get("attacked_this_turn", false):
-			var atk = CardDatabase.get(player["monster_zones"][i].card_id).get("atk", 0)
+		var monster_obj = player["monster_zones"][i]
+		if monster_obj and monster_obj.position == "face_up_attack" and not monster_obj.get("attacked_this_turn", false):
+			var atk = CardDatabase.get(monster_obj.card_id).get("atk", 0)
 			if atk > best_atk:
 				best_atk = atk
 				best_atk_zone = i
-	
 	if best_atk_zone == -1:
-		return action
-	
-	# Direct attack nếu đối thủ không có quái
+		return {"type": "", "player_id": player_id, "payload": {}}
+
+	# Kiểm tra direct attack
 	var has_monster = false
 	for zone in opponent["monster_zones"]:
 		if zone != null:
@@ -1484,9 +1561,11 @@ func _choose_attack_action(state, player_id, action_details):
 	if not has_monster:
 		for act in action_details:
 			if act.type == "DECLARE_ATTACK" and act.payload["atk_zone"] == best_atk_zone and not act.payload.has("target_zone"):
-				return act
-	
-	# Tấn công quái yếu nhất của đối thủ
+				var action = act.duplicate()
+				action["player_id"] = player_id
+				return action
+
+	# Tấn công quái yếu nhất
 	var weakest_atk = 999999
 	var weakest_zone = -1
 	for i in range(5):
@@ -1495,37 +1574,43 @@ func _choose_attack_action(state, player_id, action_details):
 			if atk < weakest_atk:
 				weakest_atk = atk
 				weakest_zone = i
-	
 	if weakest_zone != -1:
 		for act in action_details:
 			if act.type == "DECLARE_ATTACK" and act.payload["atk_zone"] == best_atk_zone and act.payload["target_zone"] == weakest_zone:
-				return act
-	
-	return action
+				var action = act.duplicate()
+				action["player_id"] = player_id
+				return action
 
+	return {"type": "", "player_id": player_id, "payload": {}}
 
 # ===========================================================================
 # _choose_trap_action(state, player_id, action_details)
 # Chọn trap để kích hoạt trong chain
 # ===========================================================================
 func _choose_trap_action(state, player_id, action_details):
-	var action = {"type": "", "player_id": player_id, "payload": {}}
-	
-	if state["chain_trigger"] and state["chain_trigger"].type == "ATTACK_DECLARED":
-		for act in action_details:
-			if act.type == "ACTIVATE_EFFECT":
-				var card_id = act.payload["card_id"]
-				var effect = CardDatabase.get(card_id).get("effect", "")
-				if effect in ["destroy_all_attackers", "destroy_summoned_monster", "reduce_atk_0"]:
-					return act
-	
-	if state["chain_trigger"] and state["chain_trigger"].type == "SUMMON":
-		for act in action_details:
-			if act.type == "ACTIVATE_EFFECT" and CardDatabase.get(act.payload["card_id"]).get("effect") == "destroy_summoned_monster":
-				return act
-	
-	return action
+	if state["chain_trigger"]:
+		var trigger_type = state["chain_trigger"].get("type", "")
+		if trigger_type == "ATTACK_DECLARED":
+			for act in action_details:
+				if act.type == "ACTIVATE_EFFECT":
+					var card_id = act.payload["card_id"]
+					var effect = CardDatabase.get(card_id).get("effect", "")
+					if effect in ["destroy_all_attackers", "destroy_summoned_monster", "reduce_atk_0"]:
+						var action = act.duplicate()
+						action["player_id"] = player_id
+						return action
 
+		elif trigger_type == "SUMMON":
+			for act in action_details:
+				if act.type == "ACTIVATE_EFFECT":
+					var card_id = act.payload["card_id"]
+					var effect = CardDatabase.get(card_id).get("effect", "")
+					if effect == "destroy_summoned_monster":
+						var action = act.duplicate()
+						action["player_id"] = player_id
+						return action
+
+	return {"type": "", "player_id": player_id, "payload": {}}
 
 # ===========================================================================
 # _get_opponent_id(state)
@@ -1536,9 +1621,6 @@ func _get_opponent_id(state):
 		if pid != state["turn"]:
 			return pid
 	return null
-
-
-
 ================================================================================
 
 --- FILE: core\main.gd ---
@@ -1595,70 +1677,73 @@ func _ready():
 # _play_next_turn()
 # Xử lý lượt tiếp theo, gọi bot hoặc giả lập người chơi
 # ===========================================================================
+# ===========================================================================
+# _play_next_turn()
+# ✅ ĐÃ SỬA: Thêm vòng lặp cho bot để thực hiện nhiều hành động trong 1 lượt
+# ===========================================================================
 func _play_next_turn():
 	var state = BattleCore.get_game_state(room_id, human_player)
-	if state.empty():
-		print("❌ Lỗi: Không tìm thấy trận đấu %s" % room_id)
+	if state.empty() or state["status"] != "active":
+		print("🏁 Kết thúc trận.")
 		return
-	
-	if state["status"] != "active":
-		print("🏁 Trận đấu kết thúc! Người thắng: %s | Lý do: %s" % [state["winner"], state["win_reason"]])
-		return
-	
-	# In trạng thái hiện tại
+
 	_print_game_state(state)
-	
+
 	if state["turn"] == bot_player:
-		# Bot chơi
-		var bot_result = YugiBot.play_turn(room_id, bot_player)
-		if bot_result.success:
-			print("🤖 Bot action: %s" % bot_result.action_taken)
-			print("📈 Kết quả: %s" % bot_result.result["events"])
-		else:
-			print("❌ Bot thất bại: %s" % bot_result.result["errors"])
+		# 🔁 VÒNG LẶP: Cho phép bot thực hiện nhiều hành động
+		while true:
+			# Lấy trạng thái mới nhất
+			var current_state = BattleCore.get_game_state(room_id, bot_player)
+			if current_state.empty() or current_state["status"] != "active" or current_state["turn"] != bot_player:
+				break
+
+			var bot_result = YugiBot.play_turn(room_id, bot_player)
+			if bot_result.success:
+				print("🤖 Bot action: %s" % bot_result.action_taken)
+				print("📈 Kết quả: %s", bot_result.result["events"])
+			else:
+				print("❌ Bot thất bại: %s" % bot_result.result["errors"])
+				break
+
+			# ✅ THÊM DÒNG NÀY: Dừng 0.1s để tránh treo
+			yield(get_tree().create_timer(0.1), "timeout")
 	else:
-		# Giả lập người chơi
+		# 👤 Người chơi (giả lập)
 		var actions = BattleCore.get_available_actions(room_id, human_player)
 		var action = _simulate_human_action(state, human_player, actions)
 		var result = BattleCore.submit_action(room_id, action)
 		if result["success"]:
 			print("👤 Human action: %s" % action)
-			print("📈 Kết quả: %s" % result["events"])
+			print("📈 Kết quả: %s" , result["events"])
 		else:
 			print("❌ Human thất bại: %s" % result["errors"])
-	
-	# Tiếp tục lượt sau (với delay để dễ theo dõi)
+
+	# Chờ 1 giây rồi tiếp tục
 	yield(get_tree().create_timer(1.0), "timeout")
 	_play_next_turn()
-
 
 # ===========================================================================
 # _simulate_human_action(state, player_id, actions)
 # Giả lập hành động cho người chơi (dựa trên heuristic đơn giản)
 # ===========================================================================
 func _simulate_human_action(state, player_id, actions):
-	# Ưu tiên: Summon quái mạnh, activate spell mạnh, attack quái yếu
-	var best_action = {"type": "", "player_id": player_id, "payload": {}}
-	
-	# Ưu tiên 1: Activate spell mạnh
+	# Ưu tiên: Activate spell mạnh
 	for act in actions.details:
 		if act.type == "PLAY_SPELL":
 			var effect = CardDatabase.get(act.payload["card_id"]).get("effect", "")
 			if effect in ["draw_2", "special_summon_graveyard", "destroy_all_monsters"]:
-				return act
-	
+				return _with_player(act, player_id)  # ✅ Đã có player_id
 	# Ưu tiên 2: Summon quái có ATK cao nhất
 	var best_atk = -1
+	var best_action = null
 	for act in actions.details:
 		if act.type == "PLAY_MONSTER":
 			var atk = CardDatabase.get(act.payload["card_id"]).get("atk", 0)
 			if atk > best_atk:
 				best_atk = atk
 				best_action = act
-	
-	if best_action.type != "":
-		return best_action
-	
+	if best_action:
+		return _with_player(best_action, player_id)  # ✅
 	# Ưu tiên 3: Attack quái yếu nhất
 	if state["phase"] == "battle":
 		var opponent_id = _get_opponent_id(state)
@@ -1673,28 +1758,38 @@ func _simulate_human_action(state, player_id, actions):
 					weakest_zone = i
 		if weakest_zone != -1:
 			for act in actions.details:
-				if act.type == "DECLARE_ATTACK" and act.payload.has("target_zone") and act.payload["target_zone"] == weakest_zone:
-					return act
-	
-	# Ưu tiên 4: Direct attack
-	for act in actions.details:
-		if act.type == "DECLARE_ATTACK" and not act.payload.has("target_zone"):
-			return act
-	
-	# Ưu tiên 5: Set trap/spell
+				if act.type == "DECLARE_ATTACK" and act.payload["target_zone"] == weakest_zone:
+					return _with_player(act, player_id)  # ✅
+		# Direct attack
+		for act in actions.details:
+			if act.type == "DECLARE_ATTACK" and not act.payload.has("target_zone"):
+				return _with_player(act, player_id)  # ✅
+	# Ưu tiên 4: Set trap/spell
 	for act in actions.details:
 		if act.type in ["SET_TRAP", "SET_SPELL"]:
-			return act
-	
-	# Mặc định: End phase hoặc turn
+			return _with_player(act, player_id)  # ✅
+	# Ưu tiên 5: Set monster
+	for act in actions.details:
+		if act.type == "SET_MONSTER":
+			return _with_player(act, player_id)  # ✅
+	# Ưu tiên 6: END_PHASE hoặc END_TURN
+	if state["phase"] == "end":
+		for act in actions.details:
+			if act.type == "END_TURN":
+				return _with_player(act, player_id)  # ✅
+		return _with_player({"type": "END_TURN", "payload": {}}, player_id)  # ✅
 	for act in actions.details:
 		if act.type == "END_PHASE":
-			return act
+			return _with_player(act, player_id)  # ✅
 		if act.type == "END_TURN":
-			return act
-	
-	return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+			return _with_player(act, player_id)  # ✅
+	# Fallback
+	return _with_player({"type": "END_TURN", "payload": {}}, player_id)  # ✅
 
+func _with_player(action, player_id):
+	var new_action = action.duplicate()
+	new_action["player_id"] = player_id
+	return new_action
 
 # ===========================================================================
 # _print_game_state(state)

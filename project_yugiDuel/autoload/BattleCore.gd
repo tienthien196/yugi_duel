@@ -467,45 +467,45 @@ func _action_change_position(game_state, player_id, payload):
 # Kích hoạt hiệu ứng của quái, spell, trap → thêm vào chain
 # ===========================================================================
 func _action_activate_effect(game_state, player_id, payload):
-    var card_id = payload["card_id"]
-    var zone_type = payload.get("zone_type", "spell_trap")
-    var player = game_state["players"][player_id]
-    
-    # Tìm vị trí
-    var zone_idx = -1
-    var zones = player["spell_trap_zones"] if zone_type == "spell_trap" else player["monster_zones"]
-    for i in range(5):
-        if zones[i] and zones[i].card_id == card_id:
-            zone_idx = i
-            break
-    if zone_idx == -1:
-        return _error(ERR_CARD_NOT_ON_FIELD)
+	var card_id = payload["card_id"]
+	var zone_type = payload.get("zone_type", "spell_trap")
+	var player = game_state["players"][player_id]
+	
+	# Tìm vị trí
+	var zone_idx = -1
+	var zones = player["spell_trap_zones"] if zone_type == "spell_trap" else player["monster_zones"]
+	for i in range(5):
+		if zones[i] and zones[i].card_id == card_id:
+			zone_idx = i
+			break
+	if zone_idx == -1:
+		return _error(ERR_CARD_NOT_ON_FIELD)
 
-    # Kiểm tra điều kiện
-    if zone_type == "spell_trap" and zones[zone_idx].status != "face_up":
-        return _error("CARD_NOT_ACTIVATABLE")
-    if zone_type == "monster":
-        var card_data = CardDatabase.get(card_id)
-        if not card_data.has("effect") or card_data["effect"] == "":
-            return _error(ERR_NO_EFFECT)
-        # ✅ Kiểm tra: SUIJIN chỉ kích hoạt khi có tấn công
-        if card_id == "SUIJIN" and (not game_state["chain_trigger"] or game_state["chain_trigger"].get("type") != "ATTACK_DECLARED"):
-            return _error("EFFECT_CANNOT_ACTIVATE_NOW")
+	# Kiểm tra điều kiện
+	if zone_type == "spell_trap" and zones[zone_idx].status != "face_up":
+		return _error("CARD_NOT_ACTIVATABLE")
+	if zone_type == "monster":
+		var card_data = CardDatabase.get(card_id)
+		if not card_data.has("effect") or card_data["effect"] == "":
+			return _error(ERR_NO_EFFECT)
+		# ✅ Kiểm tra: SUIJIN chỉ kích hoạt khi có tấn công
+		if card_id == "SUIJIN" and (not game_state["chain_trigger"] or game_state["chain_trigger"].get("type") != "ATTACK_DECLARED"):
+			return _error("EFFECT_CANNOT_ACTIVATE_NOW")
 
-    # Thêm vào chain
-    game_state["chain"].append({
-        "card_id": card_id,
-        "player_id": player_id,
-        "zone_type": zone_type,
-        "zone_idx": zone_idx
-    })
+	# Thêm vào chain
+	game_state["chain"].append({
+		"card_id": card_id,
+		"player_id": player_id,
+		"zone_type": zone_type,
+		"zone_idx": zone_idx
+	})
 
-    return {
-        "success": true,
-        "events": [
-            {"type": "ACTIVATE_EFFECT", "card_id": card_id, "player": player_id}
-        ]
-    }
+	return {
+		"success": true,
+		"events": [
+			{"type": "ACTIVATE_EFFECT", "card_id": card_id, "player": player_id}
+		]
+	}
 
 
 func _action_declare_attack(game_state, player_id, payload):
