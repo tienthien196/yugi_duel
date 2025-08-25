@@ -1,5 +1,5 @@
 # ===========================================================================
-# NetworkClient.gd - Client ENet for Godot 3.6
+# NetworkClient.gd - Client ENet for Godot 3.6 + Console Debug
 # - Sends/receives plain dictionaries via RPC "receive_message"
 # - Unified protocol with server
 # ===========================================================================
@@ -32,10 +32,11 @@ signal room_created(room_id)
 signal error_received(code, message)
 
 func _ready():
-	pass
+	print("[NET] NetworkClient ready")
 
 func connect_to_server(ip := "", port := 0):
 	if connected:
+		print("[NET] Already connected to %s:%d" % [server_ip, server_port])
 		return true
 	if ip != "":
 		server_ip = ip
@@ -44,18 +45,22 @@ func connect_to_server(ip := "", port := 0):
 	peer = NetworkedMultiplayerENet.new()
 	var err = peer.create_client(server_ip, server_port)
 	if err != OK:
+		print("[NET] ❌ create_client failed err=%d to %s:%d" % [err, server_ip, server_port])
 		emit_signal("connection_failed")
 		return false
 	get_tree().network_peer = peer
 	connected = true
+	print("[NET] 🌐 Connecting to %s:%d ..." % [server_ip, server_port])
 	get_tree().connect("connection_failed", self, "_on_connection_failed")
 	get_tree().connect("server_disconnected", self, "_on_server_disconnected")
 	return true
 
 func _on_connection_failed():
+	print("[NET] ❌ Connection failed")
 	emit_signal("connection_failed")
 
 func _on_server_disconnected():
+	print("[NET] 🔌 Disconnected from server")
 	connected = false
 	emit_signal("server_disconnected")
 
@@ -63,7 +68,9 @@ func _on_server_disconnected():
 func send_message(msg: Dictionary):
 	if not connected or not get_tree().network_peer:
 		push_error("Not connected")
+		print("[NET] ❌ send_message while not connected: %s" % str(msg))
 		return
+	print("[NET] 📤 -> %s" % str(msg))
 	rpc_id(1, "receive_message", msg) # server peer_id is 1
 
 func send_auth_login(username: String, password: String):
@@ -82,7 +89,9 @@ func send_list_rooms():
 # ---------------- Receiving (from server) ----------------
 remote func receive_message(message):
 	if typeof(message) != TYPE_DICTIONARY:
+		print("[NET] ⚠️ Received non-dictionary message: %s" % str(message))
 		return
+	print("[NET] 📥 <- %s" % str(message))
 	var t = str(message.get("type",""))
 	match t:
 		"AUTH_REQUEST":
@@ -108,4 +117,10 @@ remote func receive_message(message):
 		"ERROR":
 			emit_signal("error_received", message.get("code",""), message.get("message",""))
 		_:
-			print("Unhandled message: ", message)
+			print("[NET] 🟡 Unhandled message: %s" % str(message))
+
+func _disconnect():
+	if connected:
+		print("[NET] Closing connection")
+		get_tree().network_peer = null
+		connected = false

@@ -12,7 +12,7 @@ var room_id = ""
 var player_id = ""
 var has_sent_login = false
 
-export var is_host = false
+export var is_host = true
 
 onready var network_client = NetworkManager
 onready var authentication = Authentication

@@ -1,0 +1,24 @@
+[gd_scene load_steps=2 format=2]
+
+[ext_resource path="res://scripts/DialogPopup.gd" type="Script" id=1]
+
+[node name="DialogPopup" type="WindowDialog"]
+rect_min_size = Vector2( 300, 120 )
+window_title = "Confirm"
+script = ExtResource( 1 )
+
+[node name="VBoxContainer" type="VBoxContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Label" type="Label" parent="VBoxContainer"]
+text = "Are you sure?"
+
+[node name="HBoxContainer" type="HBoxContainer" parent="VBoxContainer"]
+alignment = 1
+
+[node name="ButtonOK" type="Button" parent="VBoxContainer/HBoxContainer"]
+text = "OK"
+
+[node name="ButtonCancel" type="Button" parent="VBoxContainer/HBoxContainer"]
+text = "Cancel"

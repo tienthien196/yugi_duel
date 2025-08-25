@@ -3,7 +3,7 @@ import os
 
 # Cấu hình
 # ROOT_DIR = r"E:\GODOT\yugi_duel\client_yugi_duel"
-ROOT_DIR = r"E:\GODOT\yugi_duel"
+ROOT_DIR = r"E:\GODOT\yugi_duel\client_yugi_duel"
 
 OUTPUT_FILE = r"E:\GODOT\yugi_duel\out.txt"
 

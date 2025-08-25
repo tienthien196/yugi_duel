@@ -1,5 +1,5 @@
 # ===========================================================================
-# GameClientController.gd - Client duel flow (Godot 3.6)
+# GameClientController.gd - Client duel flow (Godot 3.6) + Console Debug
 # ===========================================================================
 extends Node
 
@@ -21,6 +21,7 @@ signal game_started(room_id)
 signal room_list_received(rooms)
 
 func _ready():
+	print("[GAME] Ready and wiring signals")
 	authentication.connect("login_success", self, "_on_login_success")
 	authentication.connect("logged_out", self, "_on_logged_out")
 
@@ -33,23 +34,28 @@ func _ready():
 
 func _on_login_success(pid, _is_guest):
 	current_player_id = pid
+	print("[GAME] Logged in as '%s'" % pid)
 
 func _on_logged_out():
+	print("[GAME] Logged out → clearing local state")
 	current_player_id = ""
 	current_room_id = ""
 	current_game_state = null
 
 # ---------------- Outgoing ----------------
 func request_room_list():
+	print("[GAME] ▶️ Requesting room list")
 	network_client.send_list_rooms()
 
 func create_room(mode := "pvp_1v1"):
 	if mode == "":
 		mode = "pvp_1v1"
+	print("[GAME] ▶️ Creating room mode=%s" % mode)
 	network_client.send_create_room(mode)
 
 func join_room(room_id: String):
 	var token = authentication.session_token
+	print("[GAME] ▶️ Joining room '%s'" % room_id)
 	network_client.send_message({
 		"type": "JOIN_ROOM",
 		"room_id": room_id,
@@ -58,6 +64,7 @@ func join_room(room_id: String):
 
 func get_game_state(room_id: String):
 	var token = authentication.session_token
+	print("[GAME] ▶️ Requesting state for room '%s'" % room_id)
 	network_client.send_message({
 		"type": "GET_STATE",
 		"room_id": room_id,
@@ -67,10 +74,12 @@ func get_game_state(room_id: String):
 # Unified submit_action API
 func submit_action(action_type: String, payload: Dictionary):
 	if current_room_id == "" or not authentication.is_authenticated:
+		print("[GAME] ❌ submit_action refused (room empty or not authenticated). action=%s" % action_type)
 		return false
 	var token = authentication.session_token
 	var action = payload.duplicate()
 	action["type"] = action_type
+	print("[GAME] ▶️ SUBMIT_ACTION type=%s payload=%s" % [action_type, str(payload)])
 	network_client.send_message({
 		"type": "SUBMIT_ACTION",
 		"room_id": current_room_id,
@@ -123,13 +132,16 @@ func surrender():
 # ---------------- Incoming ----------------
 func _on_room_created(room_id):
 	current_room_id = room_id
+	print("[GAME] 🆕 Room created: %s" % room_id)
 	emit_signal("joined_room", room_id)
 
 func _on_room_list_received(rooms):
+	print("[GAME] 📋 Room list received (%d): %s" % [rooms.size(), str(rooms)])
 	emit_signal("room_list_received", rooms)
 
 func _on_game_started(room_id):
 	current_room_id = room_id
+	print("[GAME] 🎮 Game started in room: %s" % room_id)
 	emit_signal("game_started", room_id)
 
 func _on_game_state_received(state: Dictionary):
@@ -140,10 +152,16 @@ func _on_game_state_received(state: Dictionary):
 		emit_signal("phase_changed", state["phase"])
 	if state.get("status","") == "finished":
 		emit_signal("game_over", state.get("winner",""), state.get("reason",""))
+	print("[GAME] 🔄 State update: turn=%s phase=%s status=%s" % [str(state.get("turn","?")), str(state.get("phase","?")), str(state.get("status","active"))])
 	emit_signal("game_state_updated", state)
 
 func _on_game_event_received(events):
+	print("[GAME] 📣 Events: %s" % str(events))
 	emit_signal("game_event_received", events)
 
 func _on_error_received(code, message):
+	print("[GAME] ❌ Error from server: %s | %s" % [str(code), str(message)])
 	emit_signal("error_received", code, message)
+
+func get_current_player_id():
+	return current_player_id
