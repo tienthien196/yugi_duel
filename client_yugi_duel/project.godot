@@ -1,0 +1,33 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=4
+
+[application]
+
+config/name="client_yugi_duel"
+run/main_scene="res://main.tscn"
+config/icon="res://icon.png"
+
+[autoload]
+
+NetworkManager="*res://autoload/NetworkClient.gd"
+Authentication="*res://autoload/Authentication.gd"
+GameClientController="*res://autoload/GameClientController.gd"
+
+[gui]
+
+common/drop_mouse_on_gui_input_disabled=true
+
+[physics]
+
+common/enable_pause_aware_picking=true
+
+[rendering]
+
+environment/default_environment="res://default_env.tres"
