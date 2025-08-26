@@ -1,618 +1,2904 @@
-=== DUMP CODE TỪ: E:\GODOT\yugi_duel\client_yugi_duel ===
+=== DUMP CODE TỪ: E:\GODOT\yugi_duel\server_yugiDuel ===
 Chỉ dump các file: .afinn, .c, .cfg, .conf, .cpp, .css, .gd, .go, .h, .hpp, .html, .ini, .java, .js, .json, .lark, .py, .rs, .toml, .ts, .yaml, .yml
 ================================================================================
 
---- FILE: autoload\Authentication.gd ---
+--- FILE: autoload\agent.gd ---
 # ===========================================================================
-# Authentication.gd - Client-side auth manager (Godot 3.6) + Console Debug
+# Agent.gd - CẬP NHẬT: Học từ EVENTS và CHAIN (không chỉ state/action)
 # ===========================================================================
+
 extends Node
 
-var is_authenticated = false
-var player_id = ""
-var session_token = ""
-var is_guest = false
+# --- State ---
+var current_game_state
+var my_player_id
+var learning_mode = true
 
-var auto_login_on_request = true
-var saved_username = ""
+# --- Q-Table (vẫn giữ để chọn hành động chính) ---
+var q_table = {}
+var learning_rate = 0.1
+var discount_factor = 0.9
+var exploration_rate = 0.3
 
-onready var network_client = NetworkManager
+# --- Rule-based Response Database (mới) ---
+# Khi có event → phản ứng nào hợp lý?
+var response_rules = {
+	"TRIGGER_EFFECT": {
+		"Mirror Force": ["ACTIVATE_EFFECT", "card_id", "Effect Veiler"],
+		"Solemn Judgment": ["ACTIVATE_EFFECT", "card_id", "Infinite Emperor"]
+	},
+	"DAMAGE_STEP": {
+		"common": ["ACTIVATE_EFFECT", "card_id", "Book of Moon"]
+	}
+}
 
-signal login_success(player_id, is_guest)
-signal login_failed(error_code)
-signal logged_out()
+# --- Feature Extraction ---
+func _extract_state_key(game_state, player_id):
+	var p = game_state["players"][player_id]
+	var opp = game_state["players"][_get_opponent_id(game_state, player_id)]
+	var my_lr = int(p.life_points / 2000)
+	var opp_lr = int(opp.life_points / 2000)
+	var my_mc = 0
+	for m in p.monster_zones:
+		if m: my_mc += 1
+	var opp_mc = 0
+	for m in opp.monster_zones:
+		if m: opp_mc += 1
+	return "%d_%d_%d_%d_%s" % [my_lr, opp_lr, my_mc, opp_mc, game_state["phase"]]
 
-func _ready():
-	print("[AUTH] Ready. Subscribing to NetworkClient signals")
-	network_client.connect("auth_success", self, "_on_auth_success")
-	network_client.connect("auth_failed", self, "_on_auth_failed")
-	network_client.connect("auth_request", self, "_on_auth_request")
+func _get_q_value(state_key, action):
+	return q_table.get(state_key, {}).get(action, 0.0)
 
-func login(username: String, password := ""):
-	username = username.strip_edges()
-	if username == "":
-		print("[AUTH] ❌ login() username empty")
-		emit_signal("login_failed", "USERNAME_EMPTY")
-		return false
-	print("[AUTH] ▶️ Sending login for user='%s'" % username)
-	network_client.send_auth_login(username, password)
-	return true
+# ===========================================================================
+# get_action(game_state, player_id, available_actions)
+# Trả về hành động chính (lượt của tôi)
+# ===========================================================================
+func get_action(game_state, player_id, available_actions):
+	my_player_id = player_id
+	current_game_state = game_state.duplicate(true)
+	
+	var state_key = _extract_state_key(game_state, player_id)
+	
+	# Khám phá hoặc khai thác
+	if randf() < exploration_rate:
+		return available_actions[randi() % available_actions.size()]
+	
+	var best_action = "END_TURN"
+	var best_value = -1e9
+	for action in available_actions:
+		var q = _get_q_value(state_key, action)
+		if q > best_value:
+			best_value = q
+			best_action = action
+	return best_action
 
-func create_guest():
-	var guest_name = "guest_%d" % (OS.get_unix_time() % 100000)
-	print("[AUTH] ▶️ Creating guest login username='%s'" % guest_name)
-	network_client.send_auth_login(guest_name, "")
+# ===========================================================================
+# on_event(game_state, event_list)
+# 🆕 Hàm mới: Khi có sự kiện → xem có cần phản ứng không?
+# Dùng để học cách "đáp lại hiệu ứng"
+# ===========================================================================
+func on_event(game_state, events, player_id):
+	my_player_id = player_id
+	current_game_state = game_state.duplicate(true)
+	
+	for event in events:
+		match event["type"]:
+			"TRIGGER_EFFECT":
+				return _handle_trigger_effect(game_state, event)
+			"CHAIN_STARTED":
+				return _handle_chain_started(game_state, event)
+			"DAMAGE_STEP":
+				return _handle_damage_step(game_state, event)
+			"SUMMON":
+				return _handle_summon_reaction(game_state, event)
+	return null  # Không phản ứng
 
-func _on_auth_request(data):
-	print("[AUTH] 🔐 Server requested authentication. auto_login_on_request=%s saved_username='%s'" % [str(auto_login_on_request), saved_username])
-	if not auto_login_on_request:
+# --- Xử lý các loại event ---
+
+func _handle_trigger_effect(game_state, event):
+	var card_name = CardDatabase.get(event["card_id"]).name
+	if response_rules.TRIGGER_EFFECT.has(card_name):
+		var rule = response_rules.TRIGGER_EFFECT[card_name]
+		if rule[0] == "ACTIVATE_EFFECT":
+			var target_card = rule[2]
+			if _has_card_in_hand(game_state, my_player_id, target_card):
+				return {
+					"type": "ACTIVATE_EFFECT",
+					"payload": { "card_id": target_card }
+				}
+	return null
+
+func _handle_summon_reaction(game_state, event):
+	# Nếu đối phương triệu hồi quái mạnh → chặn bằng bẫy
+	var card_data = CardDatabase.get(event["card_id"])
+	if card_data["attack"] >= 2500:
+		if _has_card_in_hand(game_state, my_player_id, "MIRROR_FORCE"):
+			return {
+				"type": "PLAY_TRAP",
+				"payload": { "card_id": "MIRROR_FORCE", "to_zone": 0 }
+			}
+	return null
+
+func _handle_chain_started(game_state, event):
+	# Đang trong chain → có thể phản ứng
+	return null  # Tạm thời không làm gì
+
+func _handle_damage_step(game_state, event):
+	return response_rules.get("DAMAGE_STEP", {}).get("common", null)
+
+# --- Hỗ trợ ---
+
+func _has_card_in_hand(game_state, player_id, card_id):
+	return game_state["players"][player_id].hand.has(card_id)
+
+func _get_opponent_id(game_state, player_id):
+	for pid in game_state["players"].keys():
+		if pid != player_id:
+			return pid
+	return null
+
+# ===========================================================================
+# learn_from_result(old_state, action, result)
+# 🆕 Học từ toàn bộ result, không chỉ reward
+# ===========================================================================
+func learn_from_result(old_state, action, result):
+	if not result["success"]:
 		return
-	if saved_username != "":
-		login(saved_username)
-	else:
-		create_guest()
+	
+	var new_state = result["game_state"]
+	var events = result["events"]
+	var state_key = _extract_state_key(old_state, action["player_id"])
+	var next_key = _extract_state_key(new_state, action["player_id"])
+	
+	# Tính reward từ events
+	var reward = 0.0
+	for event in events:
+		match event["type"]:
+			"DAMAGE":
+				if event["target"] == action["player_id"]:
+					reward -= event["amount"] / 100.0
+				else:
+					reward += event["amount"] / 100.0
+			"WIN":
+				if event["winner"] == action["player_id"]:
+					reward += 10.0
+				else:
+					reward -= 10.0
+			"SUMMON":
+				var card = CardDatabase.get(event["card_id"])
+				if card and card["attack"] > 2500:
+					reward += 0.5
+			"DESTROYED":
+				if event["player"] == action["player_id"]:
+					reward -= 1.0
+				else:
+					reward += 1.0
+	
+	# Cập nhật Q-value
+	var old_q = _get_q_value(state_key, action["type"])
+	var future = 0.0
+	if new_state["status"] != "finished":
+		for a in ["END_TURN", "PLAY_MONSTER", "ACTIVATE_EFFECT"]:
+			future = max(future, _get_q_value(next_key, a))
+	var new_q = (1 - learning_rate) * old_q + learning_rate * (reward + discount_factor * future)
+	
+	if not q_table.has(state_key):
+		q_table[state_key] = {}
+	q_table[state_key][action["type"]] = new_q
+	
+	# 🆕 Học từ events để cập nhật response_rules
+	_learn_from_events(events, action["player_id"])
 
-func _on_auth_success(data: Dictionary):
-	var pid = str(data.get("player_id",""))
-	var token = str(data.get("token",""))
-	print("[AUTH] ✅ AUTH_SUCCESS player_id='%s' token_len=%d" % [pid, token.length()])
-	if pid == "" or token == "":
-		print("[AUTH] ❌ Invalid auth response from server: %s" % str(data))
-		emit_signal("login_failed", "INVALID_AUTH_RESPONSE")
-		return
-	player_id = pid
-	session_token = token
-	is_authenticated = true
-	is_guest = pid.begins_with("guest_")
-	emit_signal("login_success", pid, is_guest)
+func _learn_from_events(events, player_id):
+	for event in events:
+		if event["type"] == "TRIGGER_EFFECT" and event["card_id"] == "MIRROR_FORCE":
+			# Nếu tôi không phản ứng → bị thiệt → nên học dùng Effect Veiler
+			if _recently_lost_battle_due_to(event["card_id"]):
+				_add_response_rule("TRIGGER_EFFECT", "Mirror Force", [
+					"ACTIVATE_EFFECT", "card_id", "EFFECT_VEILER"
+				])
 
-func _on_auth_failed(error_code):
-	print("[AUTH] ❌ AUTH_FAILED code=%s" % str(error_code))
-	_clear_session()
-	emit_signal("login_failed", error_code)
+func _add_response_rule(category, trigger, action):
+	if not response_rules.has(category):
+		response_rules[category] = {}
+	response_rules[category][trigger] = action
 
-func logout():
-	if not is_authenticated:
-		print("[AUTH] logout() called while not authenticated → ignore")
-		return
-	print("[AUTH] ▶️ Sending LOGOUT for player_id='%s'" % player_id)
-	network_client.send_message({
-		"type": "LOGOUT",
-		"token": session_token
-	})
-	_clear_session()
-	emit_signal("logged_out")
-	print("[AUTH] 🚪 Logged out")
+func _recently_lost_battle_due_to(card_id):
+	# Có thể lưu log trận thua
+	return false  # Tạm thời
 
-func _clear_session():
-	is_authenticated = false
-	player_id = ""
-	session_token = ""
-	is_guest = false
+
+
 
 ================================================================================
 
---- FILE: autoload\BotClient.gd ---
+--- FILE: autoload\AuthManager.gd ---
 # ===========================================================================
-# BotClient.gd - Simple automated client bot (Godot 3.6) + Console Debug
-# Usage: Add as an Autoload "BotClient". It will connect & play automatically.
-# ===========================================================================
-extends Node
-
-export(String) var server_ip := "127.0.0.1"
-export(int) var server_port := 8080
-export(bool) var auto_create_room_if_empty := true
-export(float) var action_delay_sec := 0.5
-
-onready var net := NetworkManager
-onready var auth := Authentication
-onready var game := GameClientController
-
-var _my_id := ""
-var _started := false
-
-func _ready():
-	print("[BOT] Starting...")
-	net.connect("server_disconnected", self, "_on_disconnected")
-	auth.connect("login_success", self, "_on_login_success")
-	auth.connect("login_failed", self, "_on_login_failed")
-	game.connect("room_list_received", self, "_on_room_list_received")
-	game.connect("joined_room", self, "_on_joined_room")
-	game.connect("game_started", self, "_on_game_started")
-	game.connect("game_state_updated", self, "_on_game_state_updated")
-	if net.connect_to_server(server_ip, server_port):
-		print("[BOT] Connected to server, waiting for AUTH_REQUEST...")
-
-func _on_disconnected():
-	print("[BOT] Disconnected from server")
-
-func _on_login_success(pid, is_guest):
-	_my_id = pid
-	print("[BOT] Logged in as %s (guest=%s)" % [pid, str(is_guest)])
-	game.request_room_list()
-
-func _on_login_failed(code):
-	print("[BOT] Login failed: %s" % str(code))
-
-func _on_room_list_received(rooms):
-	print("[BOT] Room list received: %s" % str(rooms))
-	if rooms.size() == 0 and auto_create_room_if_empty:
-		print("[BOT] No rooms → creating one")
-		game.create_room()
-	else:
-		# Try join the first room
-		for r in rooms:
-			if r.has("room_id"):
-				print("[BOT] Joining room %s" % r["room_id"])
-				game.join_room(r["room_id"])
-				return
-		print("[BOT] No joinable rooms → creating one")
-		game.create_room()
-
-func _on_joined_room(room_id):
-	print("[BOT] Joined room %s, waiting start..." % room_id)
-
-func _on_game_started(room_id):
-	print("[BOT] Game started in %s" % room_id)
-	_started = true
-
-func _on_game_state_updated(state):
-	if not _started:
-		return
-	# Extremely simple strategy: if it's my turn -> end turn after a short delay
-	if typeof(state) == TYPE_DICTIONARY and state.get("turn","") == _my_id:
-		print("[BOT] My turn -> END_TURN (after delay %.2fs)" % action_delay_sec)
-		yield(get_tree().create_timer(action_delay_sec), "timeout")
-		game.end_turn()
-
-================================================================================
-
---- FILE: autoload\GameClientController.gd ---
-# ===========================================================================
-# GameClientController.gd - Client duel flow (Godot 3.6) + Console Debug
+# AuthManager.gd - Simple token auth (Godot 3.6) + Console Debug
 # ===========================================================================
 extends Node
 
-var current_room_id = ""
-var current_player_id = ""
-var current_game_state = null
+const TOKEN_EXPIRE_TIME = 3600
 
-onready var network_client = NetworkManager
-onready var authentication = Authentication
+var sessions = {}    # token -> { player_id, peer_id, created_time }
+signal player_authenticated(player_id, session_token, peer_id)
+signal player_logged_out(player_id)
+signal auth_failed(peer_id, error_code)
 
-signal game_state_updated(state)
-signal game_event_received(events)
-signal player_turn_changed(next_player)
-signal phase_changed(new_phase)
-signal game_over(winner, reason)
-signal joined_room(room_id)
-signal error_received(code, message)
-signal game_started(room_id)
-signal room_list_received(rooms)
+onready var network_manager = NetworkManager
 
 func _ready():
-	print("[GAME] Ready and wiring signals")
-	authentication.connect("login_success", self, "_on_login_success")
-	authentication.connect("logged_out", self, "_on_logged_out")
+	print("[S-AUTH] Ready")
+	network_manager.connect("client_connected", self, "_on_client_connected")
+	network_manager.connect("message_received", self, "_on_message_received")
 
-	network_client.connect("game_state_received", self, "_on_game_state_received")
-	network_client.connect("game_event_received", self, "_on_game_event_received")
-	network_client.connect("room_created", self, "_on_room_created")
-	network_client.connect("error_received", self, "_on_error_received")
-	network_client.connect("room_list_received", self, "_on_room_list_received")
-	network_client.connect("game_started", self, "_on_game_started")
+func _on_client_connected(player_id, peer_id):
+	print("[S-AUTH] Client connected player_id=%s peer_id=%s" % [str(player_id), str(peer_id)])
+	# No-op; NetworkManager already sent AUTH_REQUEST
+	pass
 
-func _on_login_success(pid, _is_guest):
-	current_player_id = pid
-	print("[GAME] Logged in as '%s'" % pid)
-
-func _on_logged_out():
-	print("[GAME] Logged out → clearing local state")
-	current_player_id = ""
-	current_room_id = ""
-	current_game_state = null
-
-# ---------------- Outgoing ----------------
-func request_room_list():
-	print("[GAME] ▶️ Requesting room list")
-	network_client.send_list_rooms()
-
-func create_room(mode := "pvp_1v1"):
-	if mode == "":
-		mode = "pvp_1v1"
-	print("[GAME] ▶️ Creating room mode=%s" % mode)
-	network_client.send_create_room(mode)
-
-func join_room(room_id: String):
-	var token = authentication.session_token
-	print("[GAME] ▶️ Joining room '%s'" % room_id)
-	network_client.send_message({
-		"type": "JOIN_ROOM",
-		"room_id": room_id,
-		"token": token
-	})
-
-func get_game_state(room_id: String):
-	var token = authentication.session_token
-	print("[GAME] ▶️ Requesting state for room '%s'" % room_id)
-	network_client.send_message({
-		"type": "GET_STATE",
-		"room_id": room_id,
-		"token": token
-	})
-
-# Unified submit_action API
-func submit_action(action_type: String, payload: Dictionary):
-	if current_room_id == "" or not authentication.is_authenticated:
-		print("[GAME] ❌ submit_action refused (room empty or not authenticated). action=%s" % action_type)
-		return false
-	var token = authentication.session_token
-	var action = payload.duplicate()
-	action["type"] = action_type
-	print("[GAME] ▶️ SUBMIT_ACTION type=%s payload=%s" % [action_type, str(payload)])
-	network_client.send_message({
-		"type": "SUBMIT_ACTION",
-		"room_id": current_room_id,
-		"token": token,
-		"action": action
-	})
-	return true
-
-# Convenience wrappers
-func play_monster(card_id: String, to_zone := -1, position := "attack"):
-	return submit_action("PLAY_MONSTER", {
-		"card_id": card_id,
-		"to_zone": to_zone,
-		"position": position
-	})
-
-func set_spell_trap(card_id: String, to_zone := -1):
-	return submit_action("SET_SPELL_TRAP", {
-		"card_id": card_id,
-		"to_zone": to_zone
-	})
-
-func activate_effect(card_id: String, zone_type := "spell_trap"):
-	return submit_action("ACTIVATE_EFFECT", {
-		"card_id": card_id,
-		"zone_type": zone_type
-	})
-
-func declare_attack(attacker_zone: int, target_zone := -1):
-	return submit_action("DECLARE_ATTACK", {
-		"atk_zone": attacker_zone,
-		"target_zone": target_zone
-	})
-
-func change_position(zone: int, to_position: String):
-	return submit_action("CHANGE_POSITION", {
-		"zone": zone,
-		"to_position": to_position
-	})
-
-func end_phase():
-	return submit_action("END_PHASE", {})
-
-func end_turn():
-	return submit_action("END_TURN", {})
-
-func surrender():
-	return submit_action("SURRENDER", {})
-
-# ---------------- Incoming ----------------
-func _on_room_created(room_id):
-	current_room_id = room_id
-	print("[GAME] 🆕 Room created: %s" % room_id)
-	emit_signal("joined_room", room_id)
-
-func _on_room_list_received(rooms):
-	print("[GAME] 📋 Room list received (%d): %s" % [rooms.size(), str(rooms)])
-	emit_signal("room_list_received", rooms)
-
-func _on_game_started(room_id):
-	current_room_id = room_id
-	print("[GAME] 🎮 Game started in room: %s" % room_id)
-	emit_signal("game_started", room_id)
-
-func _on_game_state_received(state: Dictionary):
-	current_game_state = state
-	if state.has("turn"):
-		emit_signal("player_turn_changed", state["turn"])
-	if state.has("phase"):
-		emit_signal("phase_changed", state["phase"])
-	if state.get("status","") == "finished":
-		emit_signal("game_over", state.get("winner",""), state.get("reason",""))
-	print("[GAME] 🔄 State update: turn=%s phase=%s status=%s" % [str(state.get("turn","?")), str(state.get("phase","?")), str(state.get("status","active"))])
-	emit_signal("game_state_updated", state)
-
-func _on_game_event_received(events):
-	print("[GAME] 📣 Events: %s" % str(events))
-	emit_signal("game_event_received", events)
-
-func _on_error_received(code, message):
-	print("[GAME] ❌ Error from server: %s | %s" % [str(code), str(message)])
-	emit_signal("error_received", code, message)
-
-func get_current_player_id():
-	return current_player_id
-
-================================================================================
-
---- FILE: autoload\NetworkClient.gd ---
-# ===========================================================================
-# NetworkClient.gd - Client ENet for Godot 3.6 + Console Debug
-# - Sends/receives plain dictionaries via RPC "receive_message"
-# - Unified protocol with server
-# ===========================================================================
-extends Node
-
-var server_ip   = "127.0.0.1"
-var server_port = 8080
-
-var peer = null
-var connected = false
-
-# Signals
-signal connected_to_server
-signal connection_failed
-signal server_disconnected
-
-signal auth_request(data)
-signal auth_success(data)            # { "player_id": "", "token": "" }
-signal auth_failed(error_code)
-
-signal game_started(room_id)
-signal game_state_received(state)
-signal game_event_received(events)
-signal action_result_received(result)
-
-signal room_list_received(rooms)
-signal room_list_update(rooms)
-signal room_created(room_id)
-
-signal error_received(code, message)
-
-func _ready():
-	print("[NET] NetworkClient ready")
-
-func connect_to_server(ip := "", port := 0):
-	if connected:
-		print("[NET] Already connected to %s:%d" % [server_ip, server_port])
-		return true
-	if ip != "":
-		server_ip = ip
-	if port != 0:
-		server_port = port
-	peer = NetworkedMultiplayerENet.new()
-	var err = peer.create_client(server_ip, server_port)
-	if err != OK:
-		print("[NET] ❌ create_client failed err=%d to %s:%d" % [err, server_ip, server_port])
-		emit_signal("connection_failed")
-		return false
-	get_tree().network_peer = peer
-	connected = true
-	print("[NET] 🌐 Connecting to %s:%d ..." % [server_ip, server_port])
-	get_tree().connect("connection_failed", self, "_on_connection_failed")
-	get_tree().connect("server_disconnected", self, "_on_server_disconnected")
-	return true
-
-func _on_connection_failed():
-	print("[NET] ❌ Connection failed")
-	emit_signal("connection_failed")
-
-func _on_server_disconnected():
-	print("[NET] 🔌 Disconnected from server")
-	connected = false
-	emit_signal("server_disconnected")
-
-# ---------------- Sending ----------------
-func send_message(msg: Dictionary):
-	if not connected or not get_tree().network_peer:
-		push_error("Not connected")
-		print("[NET] ❌ send_message while not connected: %s" % str(msg))
-		return
-	print("[NET] 📤 -> %s" % str(msg))
-	rpc_id(1, "receive_message", msg) # server peer_id is 1
-
-func send_auth_login(username: String, password: String):
-	send_message({
-		"type": "AUTH_LOGIN",
-		"username": username,
-		"password": password
-	})
-
-func send_create_room(mode := "pvp_1v1"):
-	send_message({ "type": "CREATE_ROOM", "mode": mode })
-
-func send_list_rooms():
-	send_message({ "type": "LIST_ROOMS" })
-
-# ---------------- Receiving (from server) ----------------
-remote func receive_message(message):
-	if typeof(message) != TYPE_DICTIONARY:
-		print("[NET] ⚠️ Received non-dictionary message: %s" % str(message))
-		return
-	print("[NET] 📥 <- %s" % str(message))
+func _on_message_received(player_id, message):
 	var t = str(message.get("type",""))
 	match t:
-		"AUTH_REQUEST":
-			emit_signal("auth_request", message)
-		"AUTH_SUCCESS":
-			emit_signal("auth_success", { "player_id": message.get("player_id",""), "token": message.get("token","") })
-		"AUTH_ERROR":
-			emit_signal("auth_failed", message.get("code","ERROR"))
-		"ROOM_LIST":
-			emit_signal("room_list_received", message.get("rooms", []))
-		"ROOM_LIST_UPDATE":
-			emit_signal("room_list_update", message.get("rooms", []))
-		"ROOM_CREATED":
-			emit_signal("room_created", message.get("room_id",""))
-		"GAME_STARTED":
-			emit_signal("game_started", message.get("room_id",""))
-		"GAME_STATE":
-			emit_signal("game_state_received", message.get("state", {}))
-		"GAME_EVENT":
-			emit_signal("game_event_received", message.get("events", []))
-		"ACTION_RESULT":
-			emit_signal("action_result_received", message.get("result", {}))
-		"ERROR":
-			emit_signal("error_received", message.get("code",""), message.get("message",""))
+		"AUTH_LOGIN":
+			_handle_login(player_id, message)
+		"LOGOUT":
+			_handle_logout(player_id, message)
 		_:
-			print("[NET] 🟡 Unhandled message: %s" % str(message))
+			pass
 
-func _disconnect():
-	if connected:
-		print("[NET] Closing connection")
-		get_tree().network_peer = null
-		connected = false
+func _handle_login(temp_player_id, message):
+	var username = str(message.get("username","")).strip_edges()
+	print("[S-AUTH] ▶️ AUTH_LOGIN from temp_pid=%s username='%s'" % [str(temp_player_id), username])
+	# Accept all usernames (guest or real); generate token and bind to current peer
+	var token = _generate_token()
+	var peer_id = network_manager._get_peer_from_player(temp_player_id)
+	sessions[token] = {
+		"player_id": username,
+		"peer_id": peer_id,
+		"created_time": OS.get_unix_time()
+	}
+	# Update mapping in NetworkManager
+	for pid in network_manager.peer_to_player.keys():
+		if pid == peer_id:
+			network_manager.peer_to_player[pid] = username
+	# Notify server-side managers
+	emit_signal("player_authenticated", username, token, peer_id)
+	# SEND AUTH_SUCCESS so client can store token
+	network_manager.send_message_to_player(username, {
+		"type": "AUTH_SUCCESS",
+		"player_id": username,
+		"token": token
+	})
+	print("[S-AUTH] ✅ Authenticated '%s' token_len=%d (peer=%s)" % [username, token.length(), str(peer_id)])
+
+func _handle_logout(player_id, message):
+	var token = str(message.get("token",""))
+	print("[S-AUTH] ▶️ LOGOUT player_id=%s token_len=%d" % [player_id, token.length()])
+	if token == "" or not sessions.has(token):
+		var peer = network_manager._get_peer_from_player(player_id)
+		if peer != 0:
+			print("[S-AUTH] ❌ Invalid token on logout")
+			network_manager.rpc_id(peer, "receive_message", { "type": "AUTH_ERROR", "code": "INVALID_TOKEN" })
+		return
+	sessions.erase(token)
+	print("[S-AUTH] 🚪 Player logged out: %s" % player_id)
+	emit_signal("player_logged_out", player_id)
+
+func verify(player_id: String, token: String) -> bool:
+	if token == "" or not sessions.has(token):
+		return false
+	var s = sessions[token]
+	return s.player_id == player_id and (OS.get_unix_time() - int(s.created_time)) <= TOKEN_EXPIRE_TIME
+
+func _generate_token() -> String:
+	var chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var s = ""
+	for i in range(32):
+		s += chars[randi() % chars.length()]
+	return s
 
 ================================================================================
 
---- FILE: core\BotTestClient.gd ---
+--- FILE: autoload\BattleCore.gd ---
 # ===========================================================================
-# BotTestClient.gd - Client test tự động (phiên bản độc lập)
-# ✅ Đã sửa: chỉ gửi login khi server yêu cầu, tránh mất gói
+# BattleCore.gd - Core xử lý trận đấu Yu-Gi-Oh! (Godot 3.6)
+# Autoload Singleton - Dùng để quản lý toàn bộ logic trận đấu
+# Không cần UI, không cần mạng - chỉ cần chạy trong Godot
+# ===========================================================================
+
+extends Node
+
+# Danh sách các trận đang diễn ra: room_id → game_state
+var active_duels = {}
+
+# Thứ tự các phase trong một lượt
+const TURN_PHASES = ["draw", "standby", "main1", "battle", "main2", "end"]
+
+# Các lý do chiến thắng
+const WIN_REASON_LP_ZERO = "lp_zero"
+const WIN_REASON_DECK_OUT = "deck_out"
+const WIN_REASON_SURRENDER = "surrender"
+const WIN_REASON_EXODIA = "exodia"
+const WIN_REASON_FORFEIT = "forfeit"
+
+# Error codes
+const ERR_ROOM_NOT_FOUND = "ROOM_NOT_FOUND"
+const ERR_DUEL_NOT_ACTIVE = "DUEL_NOT_ACTIVE"
+const ERR_INVALID_PLAYER = "INVALID_PLAYER"
+const ERR_NOT_YOUR_TURN = "NOT_YOUR_TURN"
+const ERR_NOT_IN_DRAW_PHASE = "NOT_IN_DRAW_PHASE"
+const ERR_NO_DRAW_FIRST_TURN = "NO_DRAW_FIRST_TURN"
+const ERR_DECK_EMPTY = "DECK_EMPTY"
+const ERR_CARD_NOT_IN_HAND = "CARD_NOT_IN_HAND"
+const ERR_ZONE_OCCUPIED = "ZONE_OCCUPIED"
+const ERR_NOT_IN_MAIN_PHASE = "NOT_IN_MAIN_PHASE"
+const ERR_NOT_MONSTER_CARD = "NOT_MONSTER_CARD"
+const ERR_NOT_SPELL_CARD = "NOT_SPELL_CARD"
+const ERR_NOT_TRAP_CARD = "NOT_TRAP_CARD"
+const ERR_SPELL_ZONE_OCCUPIED = "SPELL_ZONE_OCCUPIED"
+const ERR_TRAP_ZONE_OCCUPIED = "TRAP_ZONE_OCCUPIED"
+const ERR_INVALID_ZONE = "INVALID_ZONE"
+const ERR_CANNOT_CHANGE_POS_THIS_TURN = "CANNOT_CHANGE_POS_THIS_TURN"
+const ERR_SAME_POSITION = "SAME_POSITION"
+const ERR_CARD_NOT_ON_FIELD = "CARD_NOT_ON_FIELD"
+const ERR_NO_EFFECT = "NO_EFFECT"
+const ERR_NOT_IN_BATTLE_PHASE = "NOT_IN_BATTLE_PHASE"
+const ERR_INVALID_ATTACKER = "INVALID_ATTACKER"
+const ERR_NOT_IN_ATTACK_POSITION = "NOT_IN_ATTACK_POSITION"
+const ERR_ALREADY_ATTACKED = "ALREADY_ATTACKED"
+const ERR_CANNOT_ATTACK_SUMMON_TURN = "CANNOT_ATTACK_SUMMON_TURN"
+const ERR_CANNOT_DIRECT_ATTACK = "CANNOT_DIRECT_ATTACK"
+const ERR_INVALID_TARGET = "INVALID_TARGET"
+const ERR_INVALID_PHASE = "INVALID_PHASE"
+const ERR_INVALID_CARD = "INVALID_CARD"
+
+# ===========================================================================
+# start_duel(player_a_id, player_b_id, deck_a, deck_b, rules)
+# Tạo một trận đấu mới
+# ===========================================================================
+func start_duel(player_a_id, player_b_id, deck_a, deck_b, rules = {}):
+	var room_id: String = "duel_%d_%d" % [OS.get_unix_time(), randi() % 10000]
+
+
+
+	
+	# Validate deck
+	for card_id in deck_a + deck_b:
+		if not CardDatabase.exists(card_id):
+			return _error(ERR_INVALID_CARD)
+		if card_id in rules.get("forbidden_cards", []):
+			return _error("FORBIDDEN_CARD_IN_DECK")
+	
+	# Sao chép và xáo bài
+	var deck_a_copy = deck_a.duplicate(true)
+	var deck_b_copy = deck_b.duplicate(true)
+	_shuffle(deck_a_copy)
+	_shuffle(deck_b_copy)
+	
+	# Bốc 5 bài đầu
+	var hand_a = _draw_cards(deck_a_copy, 5)
+	var hand_b = _draw_cards(deck_b_copy, 5)
+	
+	# Chọn ai đi trước
+	var first_player = [player_a_id, player_b_id][randi() % 2]
+	
+	# Tạo trạng thái trận đấu
+	var start_lp = rules.get("start_lp", 8000)
+	var game_state = {
+		"room_id": room_id,
+		"turn": first_player,
+		"phase": "draw",
+		"current_turn_count": 1,
+		"is_first_turn": true,
+		"first_player": first_player,
+		"players": {
+			player_a_id: _create_player_state(player_a_id, deck_a_copy, hand_a, start_lp),
+			player_b_id: _create_player_state(player_b_id, deck_b_copy, hand_b, start_lp)
+		},
+		"status": "active",
+		"winner": null,
+		"win_reason": null,
+		"chain": [],
+		"chain_trigger": null,  # Lưu hành động trigger chain
+		"rules": {
+			"start_lp": start_lp,
+			"max_hand_size": rules.get("max_hand_size", 6),
+			"forbidden_cards": rules.get("forbidden_cards", [])
+		}
+	}
+	
+	# Lưu vào hệ thống
+	active_duels[room_id] = game_state
+	print("✅ BattleCore: Trận '%s' đã khởi tạo. Người đi trước: %s" % [room_id, first_player])
+	var temp: String = room_id
+	
+	
+	return temp
+
+
+# ===========================================================================
+# submit_action(room_id, action)
+# Xử lý hành động từ người chơi hoặc bot
+# Trả về: { success, events, available_actions, errors }
+# ===========================================================================
+func submit_action(room_id, action):
+	if not active_duels.has(room_id):
+		return _error(ERR_ROOM_NOT_FOUND)
+	
+	var game_state = active_duels[room_id]
+	if game_state["status"] != "active":
+		return _error(ERR_DUEL_NOT_ACTIVE)
+	
+	var player_id = action.get("player_id", "")
+	if not game_state["players"].has(player_id):
+		return _error(ERR_INVALID_PLAYER)
+	
+	# Kiểm tra lượt đi (trừ khi chain hoặc quick effect)
+	if game_state["turn"] != player_id and action["type"] != "ACTIVATE_EFFECT":
+		if not _can_activate_effect_out_of_turn(game_state, action):
+			return _error(ERR_NOT_YOUR_TURN)
+	
+	# Xử lý hành động
+	var result = _process_action(game_state, action)
+	
+	# Cập nhật trạng thái
+	if result["success"] and action["type"] == "ACTIVATE_EFFECT":
+		_resolve_chain(game_state, action)
+	
+	# Cập nhật lại trạng thái
+	active_duels[room_id] = game_state
+	
+	# Kiểm tra điều kiện chiến thắng
+	var win_check = _check_win_condition(game_state)
+	if win_check.winner:
+		game_state["winner"] = win_check.winner
+		game_state["win_reason"] = win_check.reason
+		game_state["status"] = "finished"
+		result["events"].append({
+			"type": "WIN",
+			"winner": win_check.winner,
+			"reason": win_check.reason
+		})
+	elif result["success"] and game_state["chain"].empty():
+		_update_phase_if_needed(game_state)
+	
+	# Gán danh sách hành động khả dụng
+	result["available_actions"] = _get_available_actions(game_state, player_id)
+	result["game_state"] = game_state.duplicate(true)
+	
+	return result
+
+
+# ===========================================================================
+# get_game_state(room_id, player_id)
+# Trả về trạng thái trận, ẩn bài trên tay đối thủ
+# ===========================================================================
+func get_game_state(room_id, player_id):
+	if not active_duels.has(room_id):
+		return {}
+	
+	var game_state = active_duels[room_id].duplicate(true)
+	var opponent_id = _get_opponent_id(game_state, player_id)
+	
+	if game_state["players"].has(opponent_id):
+		var opponent = game_state["players"][opponent_id]
+		opponent["hand"] = []  # Ẩn bài
+		opponent["hand_count"] = len(opponent["hand"])  # Giữ số lượng
+	
+	return game_state
+
+
+# ===========================================================================
+# get_available_actions(room_id, player_id)
+# Trả về danh sách hành động hợp lệ (dùng cho bot)
+# ===========================================================================
+func get_available_actions(room_id, player_id):
+	if not active_duels.has(room_id):
+		return []
+	var game_state = active_duels[room_id]
+	return _get_available_actions(game_state, player_id)
+
+
+# ===========================================================================
+# end_duel(room_id, winner, reason)
+# Kết thúc trận đấu (dùng cho test, lỗi, v.v.)
+# ===========================================================================
+func end_duel(room_id, winner, reason = WIN_REASON_FORFEIT):
+	if not active_duels.has(room_id):
+		return
+	var game_state = active_duels[room_id]
+	game_state["winner"] = winner
+	game_state["win_reason"] = reason
+	game_state["status"] = "finished"
+	print("🏁 Trận '%s' kết thúc. Người thắng: %s | Lý do: %s" % [room_id, winner, reason])
+
+
+# ===========================================================================
+# HÀM XỬ LÝ HÀNH ĐỘNG
+# ===========================================================================
+func _process_action(game_state, action):
+	var player_id = action["player_id"]
+	var result = {
+		"success": false,
+		"events": [],
+		"errors": []
+	}
+	
+	match action["type"]:
+		"DRAW_CARD":
+			result = _action_draw_card(game_state, player_id)
+		"PLAY_MONSTER":
+			result = _action_play_monster(game_state, player_id, action["payload"])
+		"SET_MONSTER":
+			result = _action_set_monster(game_state, player_id, action["payload"])
+		"PLAY_SPELL", "SET_SPELL":
+			result = _action_play_spell(game_state, player_id, action["payload"], action["type"] == "SET_SPELL")
+		"PLAY_TRAP", "SET_TRAP":
+			result = _action_play_trap(game_state, player_id, action["payload"], action["type"] == "SET_TRAP")
+		"END_TURN":
+			result = _action_end_turn(game_state, player_id)
+		"SURRENDER":
+			result = _action_surrender(game_state, player_id)
+		"CHANGE_POSITION":
+			result = _action_change_position(game_state, player_id, action["payload"])
+		"ACTIVATE_EFFECT":
+			result = _action_activate_effect(game_state, player_id, action["payload"])
+		"DECLARE_ATTACK":
+			result = _action_declare_attack(game_state, player_id, action["payload"])
+		"END_PHASE":
+			result = _action_end_phase(game_state, player_id)
+		_:
+			result["errors"].append("UNKNOWN_ACTION")
+	
+	if result["success"]:
+		print("✅ Action: %s | Player: %s" % [action["type"], player_id])
+	else:
+		var error_msg = result["errors"][0] if len(result["errors"]) > 0 else "Unknown"
+		print("❌ Action failed: %s | Error: %s" % [action["type"], error_msg])
+	
+	return result
+
+
+# ===========================================================================
+# CÁC HÀM HÀNH ĐỘNG CHI TIẾT
+# ===========================================================================
+func _action_draw_card(game_state, player_id):
+	var player = game_state["players"][player_id]
+	if game_state["phase"] != "draw":
+		return _error(ERR_NOT_IN_DRAW_PHASE)
+	if game_state["is_first_turn"] and player_id == game_state["first_player"]:
+		return _error(ERR_NO_DRAW_FIRST_TURN)
+	if player["deck"].empty():
+		return _error(ERR_DECK_EMPTY)
+	
+	var card = player["deck"].pop_front()
+	player["hand"].append(card)
+	
+	return {
+		"success": true,
+		"events": [
+			{ "type": "DRAW_CARD", "card_id": card, "player": player_id }
+		]
+	}
+
+func _action_play_monster(game_state, player_id, payload):
+	var player = game_state["players"][player_id]
+	var card_id = payload["card_id"]
+	var to_zone = payload["to_zone"]
+	var position = payload.get("position", "face_up_attack")
+
+	if not player["hand"].has(card_id):
+		return _error(ERR_CARD_NOT_IN_HAND)
+	if to_zone < 0 or to_zone >= 5 or player["monster_zones"][to_zone] != null:
+		return _error(ERR_ZONE_OCCUPIED)
+	if not game_state["phase"] in ["main1", "main2"]:
+		return _error(ERR_NOT_IN_MAIN_PHASE)
+	if CardDatabase.get(card_id).get("type") != "monster":
+		return _error(ERR_NOT_MONSTER_CARD)
+
+	player["hand"].erase(card_id)
+	player["monster_zones"][to_zone] = {
+		"card_id": card_id,
+		"position": position,
+		"status": "summoned_this_turn",
+		"attacked_this_turn": false
+	}
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": "SUMMON", "card_id": card_id, "player": player_id, "zone": to_zone }
+		]
+	}
+
+func _action_set_monster(game_state, player_id, payload):
+	var player = game_state["players"][player_id]
+	var card_id = payload["card_id"]
+	var to_zone = payload["to_zone"]
+
+	if not player["hand"].has(card_id):
+		return _error(ERR_CARD_NOT_IN_HAND)
+	if to_zone < 0 or to_zone >= 5 or player["monster_zones"][to_zone] != null:
+		return _error(ERR_ZONE_OCCUPIED)
+	if not game_state["phase"] in ["main1", "main2"]:
+		return _error(ERR_NOT_IN_MAIN_PHASE)
+	if CardDatabase.get(card_id).get("type") != "monster":
+		return _error(ERR_NOT_MONSTER_CARD)
+
+	player["hand"].erase(card_id)
+	player["monster_zones"][to_zone] = {
+		"card_id": card_id,
+		"position": "face_down_defense",
+		"status": "set_this_turn",
+		"attacked_this_turn": false
+	}
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": "SET_MONSTER", "card_id": card_id, "player": player_id, "zone": to_zone }
+		]
+	}
+
+func _action_play_spell(game_state, player_id, payload, is_set):
+	var player = game_state["players"][player_id]
+	var card_id = payload["card_id"]
+	var to_zone = payload["to_zone"]
+
+	if not player["hand"].has(card_id):
+		return _error(ERR_CARD_NOT_IN_HAND)
+	if to_zone < 0 or to_zone >= 5 or player["spell_trap_zones"][to_zone] != null:
+		return _error(ERR_SPELL_ZONE_OCCUPIED)
+	if not game_state["phase"] in ["main1", "main2"]:
+		return _error(ERR_NOT_IN_MAIN_PHASE)
+	if CardDatabase.get(card_id).get("type") != "spell":
+		return _error(ERR_NOT_SPELL_CARD)
+
+	player["hand"].erase(card_id)
+	var status = "face_down" if is_set else "face_up"
+	player["spell_trap_zones"][to_zone] = {
+		"card_id": card_id,
+		"status": status
+	}
+
+	var event_type = "SET_SPELL" if is_set else "PLAY_SPELL"
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": event_type, "card_id": card_id, "player": player_id, "zone": to_zone }
+		]
+	}
+
+func _action_play_trap(game_state, player_id, payload, is_set):
+	var player = game_state["players"][player_id]
+	var card_id = payload["card_id"]
+	var to_zone = payload["to_zone"]
+
+	if not player["hand"].has(card_id):
+		return _error(ERR_CARD_NOT_IN_HAND)
+	if to_zone < 0 or to_zone >= 5 or player["spell_trap_zones"][to_zone] != null:
+		return _error(ERR_TRAP_ZONE_OCCUPIED)
+	if CardDatabase.get(card_id).get("type") != "trap":
+		return _error(ERR_NOT_TRAP_CARD)
+
+	player["hand"].erase(card_id)
+	var status = "face_down" if is_set else "face_up"
+	player["spell_trap_zones"][to_zone] = {
+		"card_id": card_id,
+		"status": status
+	}
+
+	var event_type = "SET_TRAP" if is_set else "ACTIVATE_TRAP"
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": event_type, "card_id": card_id, "player": player_id, "zone": to_zone }
+		]
+	}
+
+func _action_end_turn(game_state, player_id):
+	if game_state["turn"] != player_id:
+		return _error(ERR_NOT_YOUR_TURN)
+	
+	_reset_turn_flags(game_state["players"][player_id])
+	game_state["turn"] = _get_opponent_id(game_state, player_id)
+	game_state["phase"] = "draw"
+	game_state["current_turn_count"] += 1
+	game_state["is_first_turn"] = false
+	game_state["chain"] = []
+	game_state["chain_trigger"] = null
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": "TURN_CHANGED", "next_player": game_state["turn"] }
+		]
+	}
+
+func _action_surrender(game_state, player_id):
+	var opponent_id = _get_opponent_id(game_state, player_id)
+	game_state["winner"] = opponent_id
+	game_state["win_reason"] = WIN_REASON_SURRENDER
+	game_state["status"] = "finished"
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": "WIN", "winner": opponent_id, "reason": WIN_REASON_SURRENDER }
+		]
+	}
+
+func _action_change_position(game_state, player_id, payload):
+	var player = game_state["players"][player_id]
+	var zone_idx = payload["zone"]
+	var to_position = payload["to_position"]  # e.g., "face_up_attack", "face_up_defense", "face_down_defense"
+
+	if zone_idx < 0 or zone_idx >= 5 or player["monster_zones"][zone_idx] == null:
+		return _error(ERR_INVALID_ZONE)
+	var card_obj = player["monster_zones"][zone_idx]
+	if card_obj.get("status") in ["summoned_this_turn", "set_this_turn"]:
+		return _error(ERR_CANNOT_CHANGE_POS_THIS_TURN)
+	if card_obj["position"] == to_position:
+		return _error(ERR_SAME_POSITION)
+
+	# Validate position
+	if not to_position in ["face_up_attack", "face_up_defense", "face_down_defense"]:
+		return _error("INVALID_POSITION")
+	
+	card_obj["position"] = to_position
+	if to_position == "face_up_defense" and card_obj["position"] == "face_down_defense":
+		# Flip summon
+		return {
+			"success": true,
+			"events": [
+				{ "type": "FLIP_SUMMON", "card_id": card_obj["card_id"], "zone": zone_idx, "player": player_id }
+			]
+		}
+
+	return {
+		"success": true,
+		"events": [
+			{ "type": "CHANGE_POSITION", "zone": zone_idx, "to_position": to_position, "player": player_id }
+		]
+	}
+
+# ===========================================================================
+# _action_activate_effect(game_state, player_id, payload)
+# Kích hoạt hiệu ứng của quái, spell, trap → thêm vào chain
+# ===========================================================================
+func _action_activate_effect(game_state, player_id, payload):
+	var card_id = payload["card_id"]
+	var zone_type = payload.get("zone_type", "spell_trap")
+	var player = game_state["players"][player_id]
+	
+	# Tìm vị trí
+	var zone_idx = -1
+	var zones = player["spell_trap_zones"] if zone_type == "spell_trap" else player["monster_zones"]
+	for i in range(5):
+		if zones[i] and zones[i].card_id == card_id:
+			zone_idx = i
+			break
+	if zone_idx == -1:
+		return _error(ERR_CARD_NOT_ON_FIELD)
+
+	# Kiểm tra điều kiện
+	if zone_type == "spell_trap" and zones[zone_idx].status != "face_up":
+		return _error("CARD_NOT_ACTIVATABLE")
+	if zone_type == "monster":
+		var card_data = CardDatabase.get(card_id)
+		if not card_data.has("effect") or card_data["effect"] == "":
+			return _error(ERR_NO_EFFECT)
+		# ✅ Kiểm tra: SUIJIN chỉ kích hoạt khi có tấn công
+		if card_id == "SUIJIN" and (not game_state["chain_trigger"] or game_state["chain_trigger"].get("type") != "ATTACK_DECLARED"):
+			return _error("EFFECT_CANNOT_ACTIVATE_NOW")
+
+	# Thêm vào chain
+	game_state["chain"].append({
+		"card_id": card_id,
+		"player_id": player_id,
+		"zone_type": zone_type,
+		"zone_idx": zone_idx
+	})
+
+	return {
+		"success": true,
+		"events": [
+			{"type": "ACTIVATE_EFFECT", "card_id": card_id, "player": player_id}
+		]
+	}
+
+
+func _action_declare_attack(game_state, player_id, payload):
+	var player = game_state["players"][player_id]
+	var opponent_id = _get_opponent_id(game_state, player_id)
+	var opponent = game_state["players"][opponent_id]
+	var atk_zone = payload["atk_zone"]
+	var target_zone = payload.get("target_zone", -1)
+
+	if game_state["phase"] != "battle":
+		return _error(ERR_NOT_IN_BATTLE_PHASE)
+	if atk_zone < 0 or atk_zone >= 5 or player["monster_zones"][atk_zone] == null:
+		return _error(ERR_INVALID_ATTACKER)
+	var attacker = player["monster_zones"][atk_zone]
+	if attacker.position != "face_up_attack":
+		return _error(ERR_NOT_IN_ATTACK_POSITION)
+	if attacker.get("attacked_this_turn", false):
+		return _error(ERR_ALREADY_ATTACKED)
+	if attacker.get("status") == "summoned_this_turn":
+		return _error(ERR_CANNOT_ATTACK_SUMMON_TURN)
+
+	var events = []
+	var atk = CardDatabase.get(attacker.card_id).get("atk", 0)
+
+	# Kích hoạt chain cho attack
+	game_state["chain_trigger"] = {"type": "ATTACK_DECLARED", "attacker_zone": atk_zone, "player_id": player_id}
+	events.append({"type": "ATTACK_DECLARED", "attacker": attacker.card_id, "zone": atk_zone})
+
+	if target_zone == -1:
+		# Direct attack
+		var has_monster = false
+		for zone in opponent["monster_zones"]:
+			if zone != null:
+				has_monster = true
+				break
+		if has_monster:
+			return _error(ERR_CANNOT_DIRECT_ATTACK)
+		opponent["life_points"] = max(0, opponent["life_points"] - atk)
+		events.append({"type": "DIRECT_ATTACK", "attacker": attacker.card_id, "damage": atk})
+	else:
+		if target_zone < 0 or target_zone >= 5 or opponent["monster_zones"][target_zone] == null:
+			return _error(ERR_INVALID_TARGET)
+		var target = opponent["monster_zones"][target_zone]
+		var target_pos = target.position
+		# ✅ SỬA: Dùng find() thay vì contains()
+		var is_defense = target_pos.find("defense") != -1
+		var target_val = CardDatabase.get(target.card_id).get("def", 0) if is_defense else CardDatabase.get(target.card_id).get("atk", 0)
+
+		# Flip if face down
+		if target_pos == "face_down_defense":
+			target.position = "face_up_defense"
+			events.append({"type": "FLIP", "card_id": target.card_id})
+
+		if atk > target_val:
+			var damage = atk - target_val
+			if is_defense:
+				damage = 0
+			else:
+				opponent["life_points"] = max(0, opponent["life_points"] - damage)
+			opponent["monster_zones"][target_zone] = null
+			opponent["graveyard"].append(target.card_id)
+			events.append({"type": "DESTROY_TARGET", "damage": damage})
+		elif atk == target_val:
+			if not is_defense:
+				player["monster_zones"][atk_zone] = null
+				player["graveyard"].append(attacker.card_id)
+			opponent["monster_zones"][target_zone] = null
+			opponent["graveyard"].append(target.card_id)
+			events.append({"type": "DESTROY_BOTH"})
+		else:
+			var damage = target_val - atk
+			player["life_points"] = max(0, player["life_points"] - damage)
+			if not is_defense:
+				player["monster_zones"][atk_zone] = null
+				player["graveyard"].append(attacker.card_id)
+			events.append({"type": "REBOUND", "damage": damage})
+
+	attacker.attacked_this_turn = true
+	return {"success": true, "events": events}
+
+func _action_end_phase(game_state, player_id):
+	if game_state["turn"] != player_id:
+		return _error(ERR_NOT_YOUR_TURN)
+	var idx = TURN_PHASES.find(game_state["phase"])
+	if idx == -1 or idx >= len(TURN_PHASES) - 1:
+		return _error(ERR_INVALID_PHASE)
+	game_state["phase"] = TURN_PHASES[idx + 1]
+	var events = [{"type": "PHASE_CHANGED", "new_phase": game_state["phase"]}]
+	
+	if game_state["phase"] == "end":
+		var player = game_state["players"][player_id]
+		if len(player["hand"]) > game_state["rules"].max_hand_size:
+			var discard_count = len(player["hand"]) - game_state["rules"].max_hand_size
+			for i in range(discard_count):
+				var card = player["hand"].pop_back()
+				player["graveyard"].append(card)
+			events.append({"type": "DISCARD_HAND", "count": discard_count})
+	
+	return {"success": true, "events": events}
+
+
+# ===========================================================================
+# HÀM HỖ TRỢ
+# ===========================================================================
+func _create_player_state(player_id, deck, hand, lp):
+	return {
+		"player_id": player_id,
+		"life_points": lp,
+		"deck": deck,
+		"hand": hand,
+		"graveyard": [],
+		"banished": [],
+		"extra_deck": [],
+		"monster_zones": [null, null, null, null, null],
+		"spell_trap_zones": [null, null, null, null, null],
+		"field_zone": null,
+		"pendulum_zones": [null, null]
+	}
+
+func _shuffle(array):
+	var n = len(array)
+	for i in range(n - 1, 0, -1):
+		var j = randi() % (i + 1)
+		var temp = array[i]
+		array[i] = array[j]
+		array[j] = temp
+	return array
+
+func _draw_cards(deck, count):
+	var cards = []
+	for i in range(min(count, len(deck))):
+		cards.append(deck.pop_front())
+	return cards
+
+func _can_activate_effect_out_of_turn(game_state, action):
+	if action["type"] != "ACTIVATE_EFFECT":
+		return false
+	var card_id = action["payload"]["card_id"]
+	var card_data = CardDatabase.get(card_id)
+	return card_data.get("type") == "trap" or card_data.get("effect") in ["quick_effect"]  # Mở rộng sau
+
+func _get_opponent_id(game_state, player_id):
+	for pid in game_state["players"]:
+		if pid != player_id:
+			return pid
+	return null
+
+func _update_phase_if_needed(game_state):
+	if game_state["phase"] == "draw" and game_state["chain"].empty():
+		if not (game_state["is_first_turn"] and game_state["turn"] == game_state["first_player"]):
+			var player = game_state["players"][game_state["turn"]]
+			if not player["deck"].empty():
+				var card = player["deck"].pop_front()
+				player["hand"].append(card)
+				print("Auto draw: %s" % card)
+		game_state["phase"] = "standby"
+
+func _get_available_actions(game_state, player_id):
+	var actions = []
+	var phase = game_state["phase"]
+	var player = game_state["players"][player_id]
+	var opponent_id = _get_opponent_id(game_state, player_id)
+	
+	var action_details = []
+	if game_state["turn"] == player_id:
+		action_details += [
+			{"type": "END_PHASE"},
+			{"type": "END_TURN"},
+			{"type": "SURRENDER"}
+		]
+	
+	if phase == "draw" and game_state["turn"] == player_id:
+		if not (game_state["is_first_turn"] and player_id == game_state["first_player"]):
+			action_details.append({"type": "DRAW_CARD"})
+	
+	if phase in ["main1", "main2"] and game_state["turn"] == player_id:
+		for card_id in player["hand"]:
+			var card_data = CardDatabase.get(card_id)
+			var card_type = card_data.get("type", "")
+			for i in range(5):
+				if card_type == "monster" and player["monster_zones"][i] == null:
+					action_details.append({
+						"type": "PLAY_MONSTER",
+						"payload": {"card_id": card_id, "to_zone": i, "position": "face_up_attack"}
+					})
+					action_details.append({
+						"type": "SET_MONSTER",
+						"payload": {"card_id": card_id, "to_zone": i}
+					})
+				elif card_type == "spell" and player["spell_trap_zones"][i] == null:
+					action_details.append({
+						"type": "PLAY_SPELL",
+						"payload": {"card_id": card_id, "to_zone": i}
+					})
+					action_details.append({
+						"type": "SET_SPELL",
+						"payload": {"card_id": card_id, "to_zone": i}
+					})
+				elif card_type == "trap" and player["spell_trap_zones"][i] == null:
+					action_details.append({
+						"type": "PLAY_TRAP",
+						"payload": {"card_id": card_id, "to_zone": i}
+					})
+					action_details.append({
+						"type": "SET_TRAP",
+						"payload": {"card_id": card_id, "to_zone": i}
+					})
+		for i in range(5):
+			if player["monster_zones"][i] and not player["monster_zones"][i].get("status") in ["summoned_this_turn", "set_this_turn"]:
+				for pos in ["face_up_attack", "face_up_defense", "face_down_defense"]:
+					if pos != player["monster_zones"][i].position:
+						action_details.append({
+							"type": "CHANGE_POSITION",
+							"payload": {"zone": i, "to_position": pos}
+						})
+			if player["monster_zones"][i] and CardDatabase.get(player["monster_zones"][i].card_id).get("effect") != "":
+				action_details.append({
+					"type": "ACTIVATE_EFFECT",
+					"payload": {"card_id": player["monster_zones"][i].card_id, "zone_type": "monster"}
+				})
+			if player["spell_trap_zones"][i] and player["spell_trap_zones"][i].status == "face_up" and CardDatabase.get(player["spell_trap_zones"][i].card_id).get("effect") != "":
+				action_details.append({
+					"type": "ACTIVATE_EFFECT",
+					"payload": {"card_id": player["spell_trap_zones"][i].card_id, "zone_type": "spell_trap"}
+				})
+	
+	if phase == "battle" and game_state["turn"] == player_id:
+		for i in range(5):
+			if player["monster_zones"][i] and player["monster_zones"][i].position == "face_up_attack" and not player["monster_zones"][i].get("attacked_this_turn", false) and not player["monster_zones"][i].get("status") == "summoned_this_turn":
+				var has_monster = false
+				for j in range(5):
+					if game_state["players"][opponent_id].monster_zones[j]:
+						has_monster = true
+						action_details.append({
+							"type": "DECLARE_ATTACK",
+							"payload": {"atk_zone": i, "target_zone": j}
+						})
+				if not has_monster:
+					action_details.append({
+						"type": "DECLARE_ATTACK",
+						"payload": {"atk_zone": i}
+					})
+	
+	# Thêm hành động cho chain
+	if not game_state["chain"].empty() and game_state["turn"] != player_id:
+		for i in range(5):
+			var card = player["spell_trap_zones"][i]
+			if card and card["status"] == "face_down" and CardDatabase.get(card["card_id"]).get("type") == "trap":
+				action_details.append({
+					"type": "ACTIVATE_EFFECT",
+					"payload": {"card_id": card["card_id"], "zone_type": "spell_trap"}
+				})
+	
+	# Chỉ lấy type để tránh payload ascendedpayload dài
+	for action in action_details:
+		if not action["type"] in actions:
+			actions.append(action["type"])
+	
+	return {"types": actions, "details": action_details}
+
+func _resolve_chain(game_state, action):
+	if game_state["chain"].empty():
+		return
+	
+	# Resolve chain theo thứ tự ngược
+	var events = []
+	for chain_link in game_state["chain"]:
+		var card_id = chain_link["card_id"]
+		var player_id = chain_link["player_id"]
+		var zone_type = chain_link["zone_type"]
+		var zone_idx = chain_link["zone_idx"]
+		var player = game_state["players"][player_id]
+		var opponent_id = _get_opponent_id(game_state, player_id)
+		var opponent = game_state["players"][opponent_id]
+		
+		var resolve_result = _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx)
+		events += resolve_result.events
+		if not resolve_result.success:
+			return resolve_result
+	
+	game_state["chain"] = []
+	game_state["chain_trigger"] = null
+	return {"success": true, "events": events}
+
+func _resolve_effect(game_state, card_id, player, opponent, zone_type, zone_idx):
+	var effect = CardDatabase.get(card_id).get("effect", "")
+	var events = []
+	
+	match effect:
+		"draw_2":
+			var drawn = _draw_cards(player["deck"], 2)
+			player["hand"] += drawn
+			events.append({"type": "DRAW_EFFECT", "cards": drawn, "player": player["player_id"]})
+		"special_summon_graveyard":
+			if player["graveyard"].empty():
+				return _error("NO_CARDS_IN_GRAVEYARD")
+			var summon_card = player["graveyard"].pop_back()
+			var free_zone = -1
+			for i in range(5):
+				if player["monster_zones"][i] == null:
+					free_zone = i
+					break
+			if free_zone == -1:
+				return _error(ERR_ZONE_OCCUPIED)
+			player["monster_zones"][free_zone] = {
+				"card_id": summon_card,
+				"position": "face_up_attack",
+				"status": "summoned_this_turn",
+				"attacked_this_turn": false
+			}
+			events.append({"type": "SPECIAL_SUMMON", "card_id": summon_card, "zone": free_zone})
+		"destroy_all_monsters":
+			for i in range(5):
+				if player["monster_zones"][i]:
+					player["graveyard"].append(player["monster_zones"][i].card_id)
+					player["monster_zones"][i] = null
+				if opponent["monster_zones"][i]:
+					opponent["graveyard"].append(opponent["monster_zones"][i].card_id)
+					opponent["monster_zones"][i] = null
+			events.append({"type": "DESTROY_ALL_MONSTERS"})
+		"destroy_all_attackers":
+			for i in range(5):
+				var zone = opponent["monster_zones"][i]
+				if zone and zone.position.find("attack") != -1:
+					opponent["graveyard"].append(zone.card_id)
+					opponent["monster_zones"][i] = null
+			events.append({"type": "DESTROY_MONSTERS", "player": opponent["player_id"]})
+		"destroy_summoned_monster":
+			var summoned = false
+			for i in range(5):
+				if opponent["monster_zones"][i] and opponent["monster_zones"][i].get("status") == "summoned_this_turn":
+					opponent["graveyard"].append(opponent["monster_zones"][i].card_id)
+					opponent["monster_zones"][i] = null
+					summoned = true
+					break
+			if not summoned:
+				return _error("NO_SUMMONED_MONSTER")
+			events.append({"type": "DESTROY_MONSTER", "player": opponent["player_id"]})
+		"reduce_atk_0":
+			if game_state["chain_trigger"] and game_state["chain_trigger"].type == "ATTACK_DECLARED":
+				var atk_zone = game_state["chain_trigger"].attacker_zone
+				var atk_player = game_state["players"][game_state["chain_trigger"].player_id]
+				if atk_player.monster_zones[atk_zone]:
+					atk_player.monster_zones[atk_zone].atk_modifier = 0
+					events.append({"type": "ATK_MODIFIED", "card_id": atk_player.monster_zones[atk_zone].card_id, "new_atk": 0})
+		_:
+			return _error(ERR_NO_EFFECT)
+	
+	# Xóa card spell/trap sau khi activate (trừ continuous)
+	if zone_type == "spell_trap" and not effect in ["continuous_effect"]:
+		player["spell_trap_zones"][zone_idx] = null
+		player["graveyard"].append(card_id)
+	
+	return {"success": true, "events": events}
+
+func _check_win_condition(game_state):
+	for pid in game_state["players"]:
+		var p = game_state["players"][pid]
+		if p.life_points <= 0:
+			return {"winner": _get_opponent_id(game_state, pid), "reason": WIN_REASON_LP_ZERO}
+		if len(p.deck) == 0 and game_state["phase"] == "draw":
+			return {"winner": _get_opponent_id(game_state, pid), "reason": WIN_REASON_DECK_OUT}
+		var exodia_pieces = ["EXODIA_HEAD", "LEFT_ARM", "RIGHT_ARM", "LEFT_LEG", "RIGHT_LEG"]
+		var has_all_exodia = true
+		for piece in exodia_pieces:
+			if not piece in p.hand:
+				has_all_exodia = false
+				break
+		if has_all_exodia:
+			return {"winner": pid, "reason": WIN_REASON_EXODIA}
+	return {"winner": null, "reason": null}
+
+func _reset_turn_flags(player):
+	for i in range(5):
+		if player["monster_zones"][i]:
+			player["monster_zones"][i].erase("status")
+			player["monster_zones"][i].erase("attacked_this_turn")
+			player["monster_zones"][i].erase("atk_modifier")
+
+func _error(reason):
+	return {
+		"success": false,
+		"errors": [reason],
+		"events": [],
+		"available_actions": []
+	}
+
+
+
+
+================================================================================
+
+--- FILE: autoload\CardDatabase.gd ---
+# ===========================================================================
+# CardDatabase.gd - Nạp và quản lý toàn bộ dữ liệu bài Yu-Gi-Oh!
+# Autoload Singleton - Dùng để truy vấn thông tin bài
+# ===========================================================================
+
+extends Node
+
+# Lưu toàn bộ dữ liệu bài: card_id → card_data
+var cards = {}
+
+# Signal để thông báo lỗi cho bot hoặc debug
+signal card_database_error(error_code, message)
+
+# Error codes
+const ERR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
+const ERR_JSON_INVALID = "JSON_INVALID"
+const ERR_CARD_INVALID = "CARD_INVALID"
+const ERR_CARD_NOT_FOUND = "CARD_NOT_FOUND"
+const PATH_CARDS = "res://data/cards.json"
+
+# ===========================================================================
+# _ready()
+# Tự động nạp file JSON khi game khởi động
+# ===========================================================================
+func _ready():
+	randomize()  # Cần cho randi()
+	var error = _load_cards(PATH_CARDS)
+	if error:
+		emit_signal("card_database_error", error[0], error[1])
+		push_error("❌ CardDatabase: Không thể nạp cards.json - %s" % error[1])
+	else:
+		print("✅ CardDatabase: Đã nạp %d lá bài." % cards.size())
+
+
+# ===========================================================================
+# _load_cards(path)
+# Nạp file JSON và lưu vào bộ nhớ
+# Trả về [error_code, message] nếu có lỗi, null nếu thành công
+# ===========================================================================
+func _load_cards(path):
+	if not File.new().file_exists(path):
+		return [ERR_FILE_NOT_FOUND, "File không tồn tại: %s" % path]
+
+	var file = File.new()
+	var err = file.open(path, File.READ)
+	if err != OK:
+		return [ERR_FILE_NOT_FOUND, "Không thể mở file: %s (mã lỗi: %d)" % [path, err]]
+
+	var json_data = file.get_as_text()
+	file.close()
+
+	if json_data.empty():
+		return [ERR_JSON_INVALID, "File JSON rỗng: %s" % path]
+
+	var parse_result = JSON.parse(json_data)
+	if parse_result.error != OK:
+		return [ERR_JSON_INVALID, "Lỗi parse JSON tại dòng %d: %s" % [parse_result.error_line, parse_result.error_string]]
+
+	var data = parse_result.result
+	if typeof(data) != TYPE_DICTIONARY:
+		return [ERR_JSON_INVALID, "JSON không phải object: %s" % path]
+
+	# Validate và gán
+	cards = {}
+	for card_id in data:
+		var card = data[card_id]
+		var error = _validate_card(card_id, card)
+		if error:
+			print("card ko hop le: %s | %s"% [card_id, error])
+			emit_signal("card_database_error", ERR_CARD_INVALID, "Card %s không hợp lệ: %s" % [card_id, error])
+			continue
+		cards[card_id] = card
+
+	return null
+
+
+# ===========================================================================
+# _validate_card(card_id, card)
+# Kiểm tra dữ liệu lá bài hợp lệ
+# Trả về null nếu ok, hoặc string mô tả lỗi
+# ===========================================================================
+
+#json parse trả về type_real ko phải type INT
+func _validate_card(card_id, card):
+	if not card is Dictionary:
+		return "Không phải dictionary"
+
+	# Tự động điền ID nếu thiếu
+	if not card.has("id") or card["id"] != card_id:
+		card["id"] = card_id  # Tự sửa
+
+	if not card.has("name"):
+		push_warning("Card %s thiếu 'name'" % card_id)
+		card["name"] = card_id
+
+	if not card.has("type") or not card["type"]  in ["monster", "spell", "trap"]:
+		return "Thiếu hoặc type không hợp lệ: %s" % card.get("type", "missing")
+
+	if card["type"] == "monster":
+		# Kiểm tra atk
+		if not card.has("atk"):
+			return "Monster thiếu atk"
+		var atk = card["atk"]
+		if typeof(atk) != TYPE_INT and typeof(atk) != TYPE_REAL:
+			return "atk phải là số (hiện tại: %s, kiểu: %s)" % [str(atk), typeof(atk)]
+		if int(atk) < 0:
+			return "atk không được âm"
+		card["atk"] = int(atk)
+
+		# Kiểm tra def
+		if not card.has("def"):
+			return "Monster thiếu def"
+		var def_val = card["def"]
+		if typeof(def_val) != TYPE_INT and typeof(def_val) != TYPE_REAL:
+			return "def phải là số"
+		if int(def_val) < 0:
+			return "def không được âm"
+		card["def"] = int(def_val)
+
+	if card["type"] in ["spell", "trap"]:
+		if not card.has("effect"):
+			push_warning("Card %s thiếu 'effect'" % card_id)
+			card["effect"] = ""
+
+	return null
+
+
+# ===========================================================================
+# get(card_id) → Dictionary
+# Lấy dữ liệu lá bài theo ID
+# Trả về {} nếu không tìm thấy
+# ===========================================================================
+func get(card_id):
+	if cards.has(card_id):
+		return cards[card_id].duplicate()  # Trả bản sao
+	else:
+		emit_signal("card_database_error", ERR_CARD_NOT_FOUND, "Không tìm thấy bài với ID '%s'" % card_id)
+		return {}
+
+
+# ===========================================================================
+# exists(card_id) → bool
+# Kiểm tra bài có tồn tại không
+# ===========================================================================
+func exists(card_id):
+	return cards.has(card_id)
+
+
+# ===========================================================================
+# find_by_name(name) → Array[card]
+# Tìm bài theo tên (phần trăm trùng khớp - đơn giản)
+# ===========================================================================
+func find_by_name(name):
+	name = name.to_lower()
+	var results = []
+	for card_id in cards:
+		var card = cards[card_id]
+		if str(card.get("name", "")).to_lower().find(name) != -1:
+			results.append(card.duplicate())
+	return results
+
+
+# ===========================================================================
+# get_cards_by_type(type) → Array[card]
+# Lấy tất cả bài theo type (monster, spell, trap)
+# ===========================================================================
+func get_cards_by_type(type):
+	var results = []
+	for card_id in cards:
+		if cards[card_id].get("type") == type:
+			results.append(cards[card_id].duplicate())
+	return results
+
+
+# ===========================================================================
+# get_random_card(type=null) → Dictionary
+# Lấy ngẫu nhiên một lá bài, tùy chọn lọc theo type
+# ===========================================================================
+func get_random_card(type=null):
+	var valid_cards = cards.keys()
+	if type:
+		var filtered_cards = []
+		for id in valid_cards:
+			if cards[id].get("type") == type:
+				filtered_cards.append(id)
+		valid_cards = filtered_cards
+	if valid_cards.empty():
+		return {}
+	var card_id = valid_cards[randi() % valid_cards.size()]
+	return cards[card_id].duplicate()
+
+
+# ===========================================================================
+# get_all() → Dictionary
+# Trả về toàn bộ cơ sở dữ liệu (dùng cho debug)
+# ===========================================================================
+func get_all():
+	return cards.duplicate(true)
+
+
+
+
+================================================================================
+
+--- FILE: autoload\DatabaseManager.gd ---
+# ===========================================================================
+# DatabaseManager.gd - Quản lý dữ liệu người chơi (Godot 3.6)
+# Autoload Singleton
+# Chức năng:
+#   - Đăng ký / đăng nhập người chơi
+#   - Lưu deck, stats, lịch sử
+#   - Dùng JSON để lưu trữ đơn giản
 # ===========================================================================
 extends Node
 
-const SERVER_IP = "127.0.0.1"
-const SERVER_PORT = 8080
-var TEST_USERNAME = "bot_%d" % (randi() % 1000)  # → bot_123 (5-7 ký tự)
+const SAVE_PATH = "user://players.json"
+var players_data = {}
 
-var room_id = ""
-var player_id = ""
-var has_sent_login = false
-
-export var is_host = true
-
-onready var network_client = NetworkManager
-onready var authentication = Authentication
-onready var game_controller = GameClientController
-
-
+# ===========================================================================
+# _ready()
+# Nạp dữ liệu người chơi từ file
+# ===========================================================================
 func _ready():
-	authentication.auto_login_on_request = false
+	_load_players()
+	randomize()  # Đảm bảo randi() hoạt động
 
-	network_client.connect("connected_to_server", self, "_on_connected_to_server")
-	network_client.connect("auth_request", self, "_on_auth_request")  # ← BẮT BUỘC
-	network_client.connect("room_list_update", self, "_on_room_list_update")
-	authentication.connect("login_success", self, "_on_login_success")
-	authentication.connect("login_failed", self, "_on_login_failed")
-	game_controller.connect("joined_room", self, "_on_joined_room")
-	game_controller.connect("game_state_updated", self, "_on_game_state_updated")
-	game_controller.connect("game_event_received", self, "_on_game_event_received")
-	game_controller.connect("error_received", self, "_on_error_received")
-	game_controller.connect("game_started", self, "_on_game_started")
-
-	_connect_to_server()
-
-
-func _connect_to_server():
-	if network_client.connect_to_server(SERVER_IP, SERVER_PORT):
-		print("✅ [BOT] Đã gửi yêu cầu kết nối đến %s:%d" % [SERVER_IP, SERVER_PORT])
-	else:
-		print("🔴 [BOT] Kết nối thất bại!")
-		_finish_test(false)
-
-
-func _on_connected_to_server():
-	print("🟢 [BOT] Kết nối thành công. Đang chờ server yêu cầu xác thực...")
-
-
-func _on_auth_request(data):
-	if has_sent_login:
+# ===========================================================================
+# _load_players()
+# Đọc file JSON, nếu không có thì tạo mới
+# ===========================================================================
+func _load_players():
+	if not File.new().file_exists(SAVE_PATH):
+		players_data = {}
+		print("🆕 Tạo file dữ liệu người chơi mới.")
 		return
-	print("🔐 [BOT] Server yêu cầu xác thực → gửi đăng nhập...")
-	if authentication.login(TEST_USERNAME):
-		has_sent_login = true
-		print("📤 [BOT] Đã gửi đăng nhập: %s" % TEST_USERNAME)
-	else:
-		print("❌ [BOT] Gửi đăng nhập thất bại!")
-		_finish_test(false)
 
-
-func _on_login_success(pid, is_guest):
-	self.player_id = pid
-	print("🟢 [BOT] ✅ Xác thực thành công: %s (guest=%s)" % [pid, is_guest])
-
-	if is_host:
-		print("🎮 [BOT] Tạo phòng mới...")
-		game_controller.create_room("pvp_1v1")
-	else:
-		print("🔍 [BOT] Yêu cầu danh sách phòng...")
-		game_controller.request_room_list()
-
-
-func _on_login_failed(error_code):
-	match error_code:
-		"INVALID_USERNAME":
-			print("❌ Tên quá dài hoặc quá ngắn!")
-		"USERNAME_EMPTY":
-			print("❌ Tên trống!")
-		"AUTH_REQUIRED":
-			print("❌ Cần đăng nhập!")
-		_:
-			print("❌ Lỗi: %s" % error_code)
-	_finish_test(false)
-
-
-func _on_joined_room(rid):
-	room_id = rid
-	print("✅ [BOT] Đã vào phòng: %s" % room_id)
-
-
-func _on_room_list_update(rooms):
-	if is_host:
+	var file = File.new()
+	if file.open(SAVE_PATH, File.READ) != OK:
+		push_error("❌ Không thể mở file: %s" % SAVE_PATH)
+		players_data = {}
 		return
-	for room in rooms:
-		if room.status == "waiting" and room.player_count == 1:
-			print("👉 [BOT] Vào phòng: %s" % room.room_id)
-			game_controller.join_room(room.room_id)
+
+	var json_str = file.get_as_text()
+	file.close()
+
+	var parse = JSON.parse(json_str)
+	if parse.error != OK:
+		push_error("❌ Lỗi parse JSON: %s" % parse.error_string)
+		players_data = {}
+		return
+
+	players_data = parse.result if typeof(parse.result) == TYPE_DICTIONARY else {}
+	print("✅ Đã nạp dữ liệu %d người chơi." % players_data.size())
+
+# ===========================================================================
+# _save_players()
+# Lưu dữ liệu người chơi xuống file
+# ===========================================================================
+func _save_players():
+	var file = File.new()
+	if file.open(SAVE_PATH, File.WRITE) != OK:
+		push_error("❌ Không thể ghi file: %s" % SAVE_PATH)
+		return
+
+	file.store_string(JSON.print(players_data))
+	file.close()
+	print("💾 Đã lưu dữ liệu người chơi.")
+
+# ===========================================================================
+# register(username, password) → Dict
+# Đăng ký người chơi mới
+# ===========================================================================
+func register(username, password):
+	if players_data.has(username):
+		return { "success": false, "error": "USERNAME_EXISTS" }
+
+	players_data[username] = {
+		"username": username,
+		"password_hash": _hash_password(password),
+		"created_at": OS.get_unix_time(),
+		"last_login": 0,
+		"lp": 8000,
+		"deck": [
+			"BLUE_EYES_WHITE_DRAGON", "DARK_MAGICIAN",
+			"POT_OF_GREED", "MONSTER_REBORN", "MIRROR_FORCE",
+			"GYOUKI", "SUMMONED_SKULL"
+		],
+		"stats": {
+			"win": 0,
+			"loss": 0,
+			"draw": 0
+		},
+		"match_history": []
+	}
+	_save_players()
+	return { "success": true, "player": players_data[username].duplicate() }
+
+# ===========================================================================
+# login(username, password) → Dict
+# Xác thực đăng nhập
+# ===========================================================================
+func login(username, password):
+	if not players_data.has(username):
+		return { "success": false, "error": "USER_NOT_FOUND" }
+
+	var data = players_data[username]
+	if data["password_hash"] != _hash_password(password):
+		return { "success": false, "error": "INVALID_PASSWORD" }
+
+	data["last_login"] = OS.get_unix_time()
+	_save_players()
+
+	return { "success": true, "player": data.duplicate() }
+
+# ===========================================================================
+# get_player(username) → Dict
+# Lấy thông tin người chơi (không bao gồm password)
+# ===========================================================================
+func get_player(username):
+	if not players_data.has(username):
+		return {}
+	var p = players_data[username].duplicate()
+	p.erase("password_hash")
+	return p
+
+# ===========================================================================
+# update_stats(username, win, loss, draw)
+# Cập nhật thống kê sau trận đấu
+# ===========================================================================
+func update_stats(username, win=0, loss=0, draw=0):
+	if not players_data.has(username):
+		return
+	players_data[username]["stats"]["win"] += win
+	players_data[username]["stats"]["loss"] += loss
+	players_data[username]["stats"]["draw"] += draw
+	_save_players()
+
+# ===========================================================================
+# add_match_history(username, opponent, result, room_id)
+# Thêm lịch sử trận đấu
+# ===========================================================================
+func add_match_history(username, opponent, result, room_id):
+	if not players_data.has(username):
+		return
+	players_data[username]["match_history"].append({
+		"opponent": opponent,
+		"result": result,  # "win", "loss", "draw"
+		"room_id": room_id,
+		"timestamp": OS.get_unix_time()
+	})
+	_save_players()
+
+# ===========================================================================
+# get_deck(username) → Array
+# Lấy bộ bài của người chơi
+# ===========================================================================
+func get_deck(username):
+	return players_data.get(username, {}).get("deck", [
+		"BLUE_EYES_WHITE_DRAGON", "DARK_MAGICIAN",
+		"POT_OF_GREED", "MONSTER_REBORN", "MIRROR_FORCE"
+	])
+
+# ===========================================================================
+# _hash_password(password) → String
+# Hash đơn giản (không dùng MD5 thật, chỉ mô phỏng)
+# ===========================================================================
+func _hash_password(password):
+	var hash_ = 5381
+	for c in password.to_ascii():
+		hash_ = (hash_ * 33) + c
+	return str(hash_)
+
+# ===========================================================================
+# create_guest() → Dict
+# Tạo người chơi tạm (guest)
+# ===========================================================================
+func create_guest():
+	var guest_id = "guest_%d" % (OS.get_unix_time() % 10000)
+	var deck = [
+		"GYOUKI", "SUMMONED_SKULL", "POT_OF_GREED",
+		"TRAP_HOLE", "SUIJIN", "DARK_MAGICIAN"
+	]
+	players_data[guest_id] = {
+		"username": guest_id,
+		"password_hash": "",
+		"created_at": OS.get_unix_time(),
+		"last_login": OS.get_unix_time(),
+		"lp": 8000,
+		"deck": deck,
+		"stats": { "win": 0, "loss": 0, "draw": 0 },
+		"match_history": [],
+		"is_guest": true
+	}
+	_save_players()
+	return { "success": true, "player": players_data[guest_id].duplicate() }
+
+================================================================================
+
+--- FILE: autoload\GameManager.gd ---
+# ===========================================================================
+# GameManager.gd - Quản lý vòng đời trận đấu
+# Không xử lý mạng, chỉ dùng BattleCore và DatabaseManager
+# ===========================================================================
+extends Node
+
+# Danh sách trận đấu: room_id → { player_a, player_b, status, ... }
+var active_games = {}
+
+# Tham chiếu
+onready var database_manager = DatabaseManager
+onready var battle_core = BattleCore
+
+# Signal
+signal game_started(room_id, player_a, player_b)
+signal game_finished(room_id, winner, reason)
+signal game_event(room_id, events)  # ✅ Thông báo event từ bot hoặc hành động
+
+# ===========================================================================
+# create_duel(player_a_id, player_b_id)
+# Tạo trận đấu mới (PvP 1v1)
+# ===========================================================================
+func create_duel(player_a_id, player_b_id):
+	var deck_a = database_manager.get_deck(player_a_id)
+	var deck_b = database_manager.get_deck(player_b_id)
+	var rules = { "start_lp": 8000, "max_hand_size": 6 }
+
+	var room_id = battle_core.start_duel(player_a_id, player_b_id, deck_a, deck_b, rules)
+	if typeof(room_id) != TYPE_STRING:
+		return { "success": false, "error": "FAILED_TO_CREATE_DUEL" }
+
+	active_games[room_id] = {
+		"player_a": player_a_id,
+		"player_b": player_b_id,
+		"room_id": room_id,
+		"status": "started",
+		"start_time": OS.get_unix_time(),
+		"mode": "pvp_1v1"
+	}
+
+	emit_signal("game_started", room_id, player_a_id, player_b_id)
+	print("🎮 GameManager: Trận PvP '%s' đã tạo giữa %s và %s" % [room_id, player_a_id, player_b_id])
+	return { "success": true, "room_id": room_id }
+
+# ===========================================================================
+# submit_action(room_id, action)
+# Gửi hành động đến BattleCore
+# ===========================================================================
+func submit_action(room_id, action):
+	if not active_games.has(room_id):
+		return { "success": false, "error": "GAME_NOT_FOUND" }
+	
+	var result = battle_core.submit_action(room_id, action)
+	# Phát tín hiệu để ServerManager broadcast
+	emit_signal("game_event", room_id, result.events)
+	return result
+
+# ===========================================================================
+# get_game_state(room_id, player_id = null)
+# Lấy trạng thái trận (ẩn bài đối thủ nếu chỉ định player_id)
+# ===========================================================================
+func get_game_state(room_id, player_id = null):
+	if not active_games.has(room_id):
+		return null
+	return battle_core.get_game_state(room_id, player_id)
+
+# ===========================================================================
+# end_game(room_id, winner, reason)
+# Kết thúc trận, cập nhật stats
+# ===========================================================================
+func end_game(room_id, winner, reason):
+	if not active_games.has(room_id):
+		return
+
+	var game = active_games[room_id]
+	var player_a = game["player_a"]
+	var player_b = game["player_b"]
+
+	# Cập nhật stats
+	if winner == player_a:
+		database_manager.update_stats(player_a, 1, 0, 0)
+		database_manager.update_stats(player_b, 0, 1, 0)
+		database_manager.add_match_history(player_a, player_b, "win", room_id)
+		database_manager.add_match_history(player_b, player_a, "loss", room_id)
+	elif winner == player_b:
+		database_manager.update_stats(player_b, 1, 0, 0)
+		database_manager.update_stats(player_a, 0, 1, 0)
+		database_manager.add_match_history(player_b, player_a, "win", room_id)
+		database_manager.add_match_history(player_a, player_b, "loss", room_id)
+
+	# Phát tín hiệu để ServerManager xử lý
+	emit_signal("game_event", room_id, [{"type": "WIN", "winner": winner, "reason": reason}])
+	
+	# Dọn dẹp
+	active_games.erase(room_id)
+	emit_signal("game_finished", room_id, winner, reason)
+	print("🏁 GameManager: Trận '%s' kết thúc. Người thắng: %s" % [room_id, winner])
+
+# ===========================================================================
+# create_duel_vs_bot(player_id)
+# Tạo trận đấu giữa người chơi và bot (AI)
+# ===========================================================================
+func create_duel_vs_bot(player_id):
+	var bot_id = "bot_ai"
+	var player_deck = database_manager.get_deck(player_id)
+	var bot_deck = _get_bot_deck()
+
+	var rules = { "start_lp": 8000, "max_hand_size": 6 }
+	var room_id = battle_core.start_duel(player_id, bot_id, player_deck, bot_deck, rules)
+
+	if typeof(room_id) != TYPE_STRING:
+		return { "success": false, "error": "FAILED_TO_CREATE_DUEL" }
+
+	# Lưu vào danh sách trận
+	active_games[room_id] = {
+		"player_a": player_id,
+		"player_b": bot_id,
+		"room_id": room_id,
+		"status": "started",
+		"start_time": OS.get_unix_time(),
+		"mode": "pve"
+	}
+
+	# Thông báo trận bắt đầu
+	emit_signal("game_started", room_id, player_id, bot_id)
+	print("🎮 GameManager: Trận PvE '%s' đã tạo giữa %s và %s" % [room_id, player_id, bot_id])
+
+	# Bắt đầu vòng lặp bot
+	_schedule_bot_turn(room_id)
+
+	return { "success": true, "room_id": room_id }
+
+# ===========================================================================
+# _get_bot_deck() → Array
+# Trả về bộ bài mẫu cho bot
+# ===========================================================================
+func _get_bot_deck() -> Array:
+	return [
+		"BLUE_EYES_WHITE_DRAGON", "BLUE_EYES_WHITE_DRAGON", "SUMMONED_SKULL",
+		"DARK_MAGICIAN", "GYOUKI", "SUIJIN", "KURIBOH", "MAN_EATER_BUTTERFLY",
+		"DARK_HOLE", "MIRROR_FORCE", "TRAP_HOLE", "POT_OF_GREED", "CARD_OF_DESTRUCTION",
+		"MONSTER_REBORN", "FACE_UP", "SACRIFICE", "OFFERING", "DRAGON", "WARRIOR", "SPELL"
+	]
+
+# ===========================================================================
+# _schedule_bot_turn(room_id)
+# Lập lịch để bot chơi lượt (dùng deferred để tránh lỗi tree)
+# ===========================================================================
+func _schedule_bot_turn(room_id):
+	get_tree().create_timer(1.5).connect("timeout", self, "_run_bot_turn", [room_id])
+
+# ===========================================================================
+# _run_bot_turn(room_id)
+# Xử lý lượt của bot
+# ===========================================================================
+func _run_bot_turn(room_id):
+	# Kiểm tra trận còn tồn tại
+	if not active_games.has(room_id):
+		return
+
+	var game = active_games[room_id]
+	var bot_id = game["player_b"]
+	if bot_id != "bot_ai":
+		return
+
+	var state = battle_core.get_game_state(room_id)
+	if not state or state.status != "active":
+		return
+
+	# Nếu đến lượt bot
+	if state.turn == bot_id:
+		var available_actions = battle_core.get_available_actions(room_id, bot_id)
+		if available_actions.empty():
 			return
 
+		# Bot chọn hành động
+		var action = YugiBot.choose_action(state, bot_id, available_actions)
+		if action:
+			action.player_id = bot_id
+			var result = battle_core.submit_action(room_id, action)
 
-func _on_game_started(rid):
-	print("🎮 [BOT] ⚔️ Trận đấu bắt đầu: %s" % rid)
+			# Học từ kết quả nếu bật learning
+			if Agent.learning_mode:
+				Agent.learn_from_result(state, action, result)
 
+			# Phát tín hiệu để ServerManager broadcast
+			emit_signal("game_event", room_id, result.events)
 
-func _on_game_state_updated(state):
-	print("🔄 [BOT] Nhận trạng thái: Lượt=%s, Phase=%s" % [state.turn, state.phase])
-	_send_test_actions(state)
+	# Nếu chưa phải lượt bot, tiếp tục schedule
+	if state.turn != bot_id and state.status == "active":
+		_schedule_bot_turn(room_id)
 
+================================================================================
 
-func _send_test_actions(state):
-	var my_id = game_controller.get_current_player_id()
-	if state.turn != my_id:
+--- FILE: autoload\NetworkManager.gd ---
+# ===========================================================================
+# NetworkManager.gd - Server ENet for Godot 3.6
+# ===========================================================================
+extends Node
+
+const DEFAULT_PORT = 8080
+const SERVER_PEER_ID = 1
+
+var is_server = false
+var peer_to_player = {}
+
+signal client_connected(player_id, peer_id)
+signal client_disconnected(peer_id)
+signal message_received(player_id, message)
+
+func _ready():
+	var enet = NetworkedMultiplayerENet.new()
+	var err = enet.create_server(DEFAULT_PORT, 32)
+	if err != OK:
+		push_error("Cannot create ENet server")
 		return
-	if state.phase in ["main1", "main2"]:
-		var hand = state.players[my_id].hand
-		var zones = state.players[my_id].field.monster_zones
-		for i in range(zones.size()):
-			if zones[i] == null and hand.size() > 0:
-				game_controller.play_monster(hand[0], i)
-				return
-		game_controller.end_turn()
+	get_tree().network_peer = enet
+	is_server = true
+	get_tree().connect("network_peer_connected", self, "_on_peer_connected")
+	get_tree().connect("network_peer_disconnected", self, "_on_peer_disconnected")
+
+func _process(_d):
+	if not is_server or not multiplayer.network_peer:
+		return
+	multiplayer.poll()
+
+func _on_peer_connected(peer_id):
+	var temp_player = "player_%d" % peer_id
+	peer_to_player[peer_id] = temp_player
+	emit_signal("client_connected", temp_player, peer_id)
+	var welcome = {
+		"type": "AUTH_REQUEST",
+		"message": "Send AUTH_LOGIN to authenticate"
+	}
+	rpc_id(peer_id, "receive_message", welcome)
+
+func _on_peer_disconnected(peer_id):
+	peer_to_player.erase(peer_id)
+	emit_signal("client_disconnected", peer_id)
+
+remote func receive_message(message):
+	var peer_id = multiplayer.get_rpc_sender_id()
+	var player_id = peer_to_player.get(peer_id, "unknown")
+	if typeof(message) != TYPE_DICTIONARY or not message.has("type"):
+		_send_error(peer_id, "MALFORMED")
+		return
+	emit_signal("message_received", player_id, message)
+
+func send_message_to_player(player_id: String, data: Dictionary):
+	var pid = _get_peer_from_player(player_id)
+	if pid == 0:
+		return
+	rpc_id(pid, "receive_message", data)
+
+func broadcast_message(data: Dictionary, exclude_player := ""):
+	for pid in peer_to_player.keys():
+		if exclude_player != "" and peer_to_player[pid] == exclude_player:
+			continue
+		rpc_id(pid, "receive_message", data)
+
+func _get_peer_from_player(player_id):
+	for pid in peer_to_player:
+		if peer_to_player[pid] == player_id:
+			return pid
+	return 0
+
+func _send_error(peer_id, code, msg := ""):
+	var e = { "type": "ERROR", "code": code, "message": msg }
+	rpc_id(peer_id, "receive_message", e)
+
+================================================================================
+
+--- FILE: autoload\PvEManager.gd ---
+# res://autoload/PvEManager.gd
+extends Node
+
+# Tham chiếu
+onready var battle_core = BattleCore
+onready var network_manager = NetworkManager
+onready var card_db = CardDatabase
+
+# ID bot ảo
+const BOT_ID = "bot_ai_1"
+const BOT_DECK = ["BLUE_EYES_WHITE_DRAGON", "BLUE_EYES_WHITE_DRAGON", "BLUE_EYES_WHITE_DRAGON", "SUIJIN", "POT_OF_GREED", "MIRROR_FORCE", "DARK_HOLE", "TRAP_HOLE", "MONSTER_REBORN", "KURIBOH"] # Ví dụ
+
+func start_pve_game(player_id, deck_player):
+	# Tạo deck cho bot (có thể random sau)
+	var deck_bot = BOT_DECK.duplicate()
+	
+	# Dùng BattleCore có sẵn để tạo trận
+	var room_id = battle_core.start_duel(player_id, BOT_ID, deck_player, deck_bot, {})
+	
+	if not room_id:
+		return false
+
+	# Gửi thông báo cho client
+	network_manager.send_message_to_player(player_id, {
+		"type": "GAME_STARTED",
+		"room_id": room_id,
+		"side": "player", # hoặc random
+		"mode": "pve"
+	})
+
+	# Bắt đầu vòng lặp bot
+	_schedule_bot_turn(room_id)
+
+	return true
+
+# Hàm lập lịch lượt bot
+func _schedule_bot_turn(room_id):
+	# Dùng timer để chạy sau khi frame hiện tại xong
+	get_tree().call_deferred("_run_bot_turn", room_id)
+
+func _run_bot_turn(room_id):
+	if not battle_core.active_duels.has(room_id):
+		return
+	
+	var game_state = battle_core.get_game_state(room_id)
+	if not game_state:
+		return
+
+	# Kiểm tra xem có phải lượt bot không
+	if game_state.turn == BOT_ID and game_state.status == "active":
+		# Lấy các hành động khả dụng
+		var available_actions = battle_core.get_available_actions(room_id, BOT_ID)
+		
+		# Bot chọn hành động (dùng YugiBot hiện có)
+		var action = YugiBot.choose_action(game_state, BOT_ID, available_actions)
+		
+		if action:
+			# Gửi hành động vào core
+			var result = battle_core.submit_action(room_id, action)
+			
+			# Gửi kết quả về cho người chơi (để update UI)
+			for player in [game_state.players.keys()[0]]: # chỉ player thật
+				if player != BOT_ID:
+					network_manager.send_message_to_player(player, {
+						"type": "ACTION_RESULT",
+						"result": result
+					})
+	
+	# Luôn schedule lại để kiểm tra tiếp
+	get_tree().create_timer(1.5).connect("timeout", self, "_schedule_bot_turn", [room_id])
+
+================================================================================
+
+--- FILE: autoload\ServerManager.gd ---
+# ===========================================================================
+# ServerManager.gd - Message router for gameplay (Godot 3.6)
+# Depends on GameManager + BattleCore existing in autoloads.
+# ===========================================================================
+extends Node
+
+var rooms = {}
+var player_to_room = {}
+
+onready var network_manager = NetworkManager
+onready var auth_manager = AuthManager
+onready var game_manager = GameManager
+
+func _ready():
+	print("[S-SERVER] Ready")
+	auth_manager.connect("player_authenticated", self, "_on_player_authenticated")
+	network_manager.connect("message_received", self, "_on_message_received")
+	game_manager.connect("game_started", self, "_on_game_started")
+	game_manager.connect("game_finished", self, "_on_game_finished")
+	game_manager.connect("game_event", self, "_on_game_event")
+
+func _on_player_authenticated(player_id, token, peer_id):
+	pass  # AUTH_SUCCESS already sent by AuthManager
+
+func _on_message_received(player_id, message):
+	var t = str(message.get("type", ""))
+	match t:
+		"LIST_ROOMS":
+			_send_room_list(player_id)
+		"CREATE_ROOM":
+			_handle_create_room(player_id, message)
+		"JOIN_ROOM":
+			_handle_join_room(player_id, message)
+		"GET_STATE":
+			_handle_get_state(player_id, message)
+		"SUBMIT_ACTION":
+			_handle_submit_action(player_id, message)
+		_:
+			pass
+
+func _handle_create_room(player_id, message):
+	var mode = str(message.get("mode", "pvp_1v1"))
+	if mode == "pve":
+		# Start PvE via GameManager
+		var result = game_manager.create_duel_vs_bot(player_id)
+		if not result.success:
+			network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": result.error, "message": "" })
+			return
+		var room_id = result.room_id
+		rooms[room_id] = { "player_a": player_id, "player_b": "bot_ai", "status": "playing", "duel_id": room_id }
+		player_to_room[player_id] = room_id
+		network_manager.send_message_to_player(player_id, { "type": "ROOM_CREATED", "room_id": room_id })
+		return
+	
+	# PvP room waiting for opponent
+	var room_id = "room_%d" % (OS.get_unix_time() % 100000)
+	rooms[room_id] = { "player_a": player_id, "player_b": "", "status": "waiting" }
+	player_to_room[player_id] = room_id
+	network_manager.send_message_to_player(player_id, { "type": "ROOM_CREATED", "room_id": room_id })
+
+func _handle_join_room(player_id, message):
+	var room_id = str(message.get("room_id", ""))
+	if room_id == "" or not rooms.has(room_id):
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_NOT_FOUND", "message": "" })
+		return
+	if rooms[room_id]["player_b"] == "" and rooms[room_id]["player_a"] != player_id:
+		rooms[room_id]["player_b"] = player_id
+		player_to_room[player_id] = room_id
+		# Start duel via GameManager
+		var ra = rooms[room_id]["player_a"]
+		var rb = rooms[room_id]["player_b"]
+		var result = game_manager.create_duel(ra, rb)
+		if not result.success:
+			network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": result.error, "message": "" })
+			return
+		rooms[room_id]["duel_id"] = result.room_id
+		rooms[room_id]["status"] = "playing"
+	else:
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_FULL", "message": "" })
+
+func _handle_get_state(player_id, message):
+	var room_id = str(message.get("room_id", ""))
+	if room_id == "" or not rooms.has(room_id):
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_NOT_FOUND", "message": "" })
+		return
+	var duel_id = rooms[room_id].get("duel_id", "")
+	var state = game_manager.get_game_state(duel_id, player_id)
+	network_manager.send_message_to_player(player_id, { "type": "GAME_STATE", "state": state })
+
+func _handle_submit_action(player_id, message):
+	var room_id = str(message.get("room_id", ""))
+	var action = message.get("action", {})
+	if room_id == "" or not rooms.has(room_id):
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_NOT_FOUND", "message": "" })
+		return
+	var duel_id = rooms[room_id].get("duel_id", "")
+	if typeof(action) != TYPE_DICTIONARY:
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "INVALID_ACTION", "message": "" })
+		return
+	action["player_id"] = player_id
+	var result = game_manager.submit_action(duel_id, action)
+	# Broadcast result và state
+	_broadcast_to_room(room_id, { "type": "ACTION_RESULT", "result": result })
+	var state = game_manager.get_game_state(duel_id)
+	_broadcast_to_room(room_id, { "type": "GAME_STATE", "state": state })
+
+func _send_room_list(player_id):
+	var list = []
+	for k in rooms.keys():
+		list.append({ "room_id": k, "status": rooms[k]["status"] })
+	network_manager.send_message_to_player(player_id, { "type": "ROOM_LIST", "rooms": list })
+
+func _on_game_started(room_id, player_a, player_b):
+	# Broadcast GAME_STARTED và initial state
+	_broadcast_to_room(room_id, { "type": "GAME_STARTED", "room_id": room_id })
+	var state = game_manager.get_game_state(room_id)
+	_broadcast_to_room(room_id, { "type": "GAME_STATE", "state": state })
+
+func _on_game_finished(room_id, winner, reason):
+	# Broadcast GAME_OVER
+	_broadcast_to_room(room_id, { "type": "GAME_OVER", "winner": winner, "reason": reason })
+	# Cleanup room
+	if rooms.has(room_id):
+		var room = rooms[room_id]
+		for pid in [room.get("player_a", ""), room.get("player_b", "")]:
+			if pid != "" and pid != "bot_ai":
+				player_to_room.erase(pid)
+		rooms.erase(room_id)
+
+func _on_game_event(room_id, events):
+	# Broadcast events và updated state
+	_broadcast_to_room(room_id, { "type": "GAME_EVENT", "events": events })
+	var duel_id = rooms[room_id].get("duel_id", "") if rooms.has(room_id) else ""
+	if duel_id != "":
+		var state = game_manager.get_game_state(duel_id)
+		_broadcast_to_room(room_id, { "type": "GAME_STATE", "state": state })
+
+# Helper to broadcast message to all players in room
+func _broadcast_to_room(room_id: String, message: Dictionary):
+	if not rooms.has(room_id):
+		return
+	var room = rooms[room_id]
+	for pid in [room.get("player_a", ""), room.get("player_b", "")]:
+		if pid != "" and pid != "bot_ai":  # Bỏ qua bot
+			network_manager.send_message_to_player(pid, message)
+
+================================================================================
+
+--- FILE: autoload\YugiBot.gd ---
+# ===========================================================================
+# YugiBot.gd - Bot chơi Yu-Gi-Oh! thủ công (Godot 3.6)
+# Autoload Singleton - Tự động chọn và thực hiện hành động dựa trên heuristic
+# Không cần UI, không cần mạng, tích hợp với BattleCore và CardDatabase
+# ===========================================================================
+extends Node
+
+# ===========================================================================
+# play_turn(room_id, player_id)
+# Bot thực hiện toàn bộ lượt của player_id trong room_id
+# Trả về: { success: bool, action_taken: Dictionary, result: Dictionary }
+# ===========================================================================
+func play_turn(room_id, player_id):
+	var state = BattleCore.get_game_state(room_id, player_id)
+	if state.empty():
+		return {"success": false, "action_taken": {}, "result": {"errors": ["ROOM_NOT_FOUND"]}}
+	if state["status"] != "active" or state["turn"] != player_id:
+		return {"success": false, "action_taken": {}, "result": {"errors": ["NOT_YOUR_TURN"]}}
+	var actions = BattleCore.get_available_actions(room_id, player_id)
+	var action = _choose_action(state, player_id, actions)
+	if action["type"] == "":
+		return {"success": false, "action_taken": {}, "result": {"errors": ["NO_ACTION_CHOSEN"]}}
+	var result = BattleCore.submit_action(room_id, action)
+	return {"success": result["success"], "action_taken": action, "result": result}
+
+# ===========================================================================
+# _choose_action(state, player_id, actions)
+# Chọn hành động tối ưu dựa trên heuristic
+# ✅ ĐÃ SỬA: Ưu tiên END_TURN khi ở phase "end"
+# ===========================================================================
+func _choose_action(state, player_id, actions):
+	var phase = state["phase"]
+	var action_details = actions.details
+
+	# Xử lý chain trước (nếu có)
+	if not state["chain"].empty():
+		var trap_action = _choose_trap_action(state, player_id, action_details)
+		if trap_action.type != "":
+			trap_action["player_id"] = player_id
+			return trap_action
+
+	# Xử lý theo phase
+	if phase == "draw" and "DRAW_CARD" in actions.types:
+		return {"type": "DRAW_CARD", "player_id": player_id, "payload": {}}
+
+	if phase in ["main1", "main2"]:
+		var main_action = _choose_main_phase_action(state, player_id, action_details)
+		if main_action.type != "":
+			main_action["player_id"] = player_id
+			return main_action
+
+	if phase == "battle":
+		var attack_action = _choose_attack_action(state, player_id, action_details)
+		if attack_action.type != "":
+			attack_action["player_id"] = player_id
+			return attack_action
+
+	# 🟢 Ưu tiên END_TURN nếu đang ở phase "end"
+	if phase == "end":
+		if "END_TURN" in actions.types:
+			return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+		elif "END_PHASE" in actions.types:
+			return {"type": "END_PHASE", "player_id": player_id, "payload": {}}
+		else:
+			return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+
+	# Nếu không phải end phase, thì END_PHASE
+	if "END_PHASE" in actions.types:
+		return {"type": "END_PHASE", "player_id": player_id, "payload": {}}
+	if "END_TURN" in actions.types:
+		return {"type": "END_TURN", "player_id": player_id, "payload": {}}
+
+	return {"type": "", "player_id": player_id, "payload": {}}
+
+# ===========================================================================
+# _choose_main_phase_action(state, player_id, action_details)
+# Chọn hành động trong main phase (summon, spell, trap)
+# ===========================================================================
+func _choose_main_phase_action(state, player_id, action_details):
+	# Ưu tiên 1: Activate spell có effect mạnh (Pot of Greed, Monster Reborn, Dark Hole)
+	for act in action_details:
+		if act.type == "PLAY_SPELL":
+			var card_id = act.payload["card_id"]
+			var effect = CardDatabase.get(card_id).get("effect", "")
+			if effect in ["draw_2", "special_summon_graveyard", "destroy_all_monsters"]:
+				var action = act.duplicate()
+				action["player_id"] = player_id
+				return action
+
+	# Ưu tiên 2: Summon quái có ATK cao nhất
+	var best_atk = -1
+	var best_action = null
+	for act in action_details:
+		if act.type == "PLAY_MONSTER":
+			var card_id = act.payload["card_id"]
+			var atk = CardDatabase.get(card_id).get("atk", 0)
+			if atk > best_atk:
+				best_atk = atk
+				best_action = act
+	if best_action:
+		var action = best_action.duplicate()
+		action["player_id"] = player_id
+		return action
+
+	# Ưu tiên 3: Set trap
+	for act in action_details:
+		if act.type == "SET_TRAP":
+			var action = act.duplicate()
+			action["player_id"] = player_id
+			return action
+
+	# Ưu tiên 4: Set spell
+	for act in action_details:
+		if act.type == "SET_SPELL":
+			var action = act.duplicate()
+			action["player_id"] = player_id
+			return action
+
+	# Ưu tiên 5: Set monster nếu không summon được
+	for act in action_details:
+		if act.type == "SET_MONSTER":
+			var action = act.duplicate()
+			action["player_id"] = player_id
+			return action
+
+	# # Ưu tiên 6: Activate effect trên sân
+	# for act in action_details:
+	# 	if act.type == "ACTIVATE_EFFECT":
+	# 		var card_id = act.payload["card_id"]
+	# 		var effect = CardDatabase.get(card_id).get("effect", "")
+	# 		if effect != "":
+	# 			var action = act.duplicate()
+	# 			action["player_id"] = player_id
+	# 			return action
+
+	return {"type": "", "player_id": player_id, "payload": {}}
+
+# ===========================================================================
+# _choose_attack_action(state, player_id, action_details)
+# Chọn hành động tấn công (ưu tiên quái yếu nhất của đối thủ)
+# ===========================================================================
+func _choose_attack_action(state, player_id, action_details):
+	var player = state["players"][player_id]
+	var opponent_id = _get_opponent_id(state)
+	var opponent = state["players"][opponent_id]
+
+	# Tìm quái mạnh nhất của mình chưa tấn công
+	var best_atk = -1
+	var best_atk_zone = -1
+	for i in range(5):
+		var monster_obj = player["monster_zones"][i]
+		if monster_obj and monster_obj.position == "face_up_attack" and not monster_obj.get("attacked_this_turn", false):
+			var atk = CardDatabase.get(monster_obj.card_id).get("atk", 0)
+			if atk > best_atk:
+				best_atk = atk
+				best_atk_zone = i
+	if best_atk_zone == -1:
+		return {"type": "", "player_id": player_id, "payload": {}}
+
+	# Kiểm tra direct attack
+	var has_monster = false
+	for zone in opponent["monster_zones"]:
+		if zone != null:
+			has_monster = true
+			break
+	if not has_monster:
+		for act in action_details:
+			if act.type == "DECLARE_ATTACK" and act.payload["atk_zone"] == best_atk_zone and not act.payload.has("target_zone"):
+				var action = act.duplicate()
+				action["player_id"] = player_id
+				return action
+
+	# Tấn công quái yếu nhất
+	var weakest_atk = 999999
+	var weakest_zone = -1
+	for i in range(5):
+		if opponent["monster_zones"][i]:
+			var atk = CardDatabase.get(opponent["monster_zones"][i].card_id).get("atk", 0)
+			if atk < weakest_atk:
+				weakest_atk = atk
+				weakest_zone = i
+	if weakest_zone != -1:
+		for act in action_details:
+			if act.type == "DECLARE_ATTACK" and act.payload["atk_zone"] == best_atk_zone and act.payload["target_zone"] == weakest_zone:
+				var action = act.duplicate()
+				action["player_id"] = player_id
+				return action
+
+	return {"type": "", "player_id": player_id, "payload": {}}
+
+# ===========================================================================
+# _choose_trap_action(state, player_id, action_details)
+# Chọn trap để kích hoạt trong chain
+# ===========================================================================
+func _choose_trap_action(state, player_id, action_details):
+	if state["chain_trigger"]:
+		var trigger_type = state["chain_trigger"].get("type", "")
+		if trigger_type == "ATTACK_DECLARED":
+			for act in action_details:
+				if act.type == "ACTIVATE_EFFECT":
+					var card_id = act.payload["card_id"]
+					var effect = CardDatabase.get(card_id).get("effect", "")
+					if effect in ["destroy_all_attackers", "destroy_summoned_monster", "reduce_atk_0"]:
+						var action = act.duplicate()
+						action["player_id"] = player_id
+						return action
+
+		elif trigger_type == "SUMMON":
+			for act in action_details:
+				if act.type == "ACTIVATE_EFFECT":
+					var card_id = act.payload["card_id"]
+					var effect = CardDatabase.get(card_id).get("effect", "")
+					if effect == "destroy_summoned_monster":
+						var action = act.duplicate()
+						action["player_id"] = player_id
+						return action
+
+	return {"type": "", "player_id": player_id, "payload": {}}
+
+# ===========================================================================
+# _get_opponent_id(state)
+# Lấy ID của đối thủ
+# ===========================================================================
+func _get_opponent_id(state):
+	for pid in state["players"]:
+		if pid != state["turn"]:
+			return pid
+	return null
+
+================================================================================
+
+--- FILE: core\main.gd ---
+# ===========================================================================
+# Main.gd - Scene chính để test hệ thống Yu-Gi-Oh! (Godot 3.6)
+# Khởi tạo trận đấu, để YugiBot chơi tự động và giả lập người chơi
+# Không dùng UI, chỉ in kết quả qua console
+# ===========================================================================
+
+extends Node
+
+var room_id = ""
+var human_player = "player_a"
+var bot_player = "player_b"
+
+# ===========================================================================
+# _ready()
+# Khởi tạo trận đấu khi scene chạy
+# ===========================================================================
+func _ready():
+	# Đảm bảo CardDatabase đã nạp
+	if CardDatabase.get_all().empty():
+		print("❌ Lỗi: CardDatabase chưa nạp dữ liệu!")
+		return
+	
+	# Tạo deck mẫu
+	var deck_a = [
+		"BLUE_EYES_WHITE_DRAGON", "BLUE_EYES_WHITE_DRAGON",
+		"POT_OF_GREED", "MONSTER_REBORN", "DARK_HOLE",
+		"SUMMONED_SKULL", "GYOUKI"
+	]
+	var deck_b = [
+		"DARK_MAGICIAN", "DARK_MAGICIAN",
+		"MIRROR_FORCE", "TRAP_HOLE", "SUIJIN",
+		"GYOUKI", "SUMMONED_SKULL"
+	]
+	
+	# Khởi tạo trận đấu
+	room_id = BattleCore.start_duel(human_player, bot_player, deck_a, deck_b, {
+		"start_lp": 8000,
+		"max_hand_size": 6,
+		"forbidden_cards": []
+	})
+	print("this is room", room_id)
+	if room_id == "":
+		print("❌ Lỗi: Không thể tạo trận đấu!")
+		return
+	
+	print("🎮 Trận đấu bắt đầu: %s" % room_id)
+	_play_next_turn()
 
 
-func _on_game_event_received(events):
-	for event in events:
-		if event.type == "WIN":
-			print("🏆 [BOT] Trận kết thúc! Người thắng: %s" % event.winner)
-			_finish_test(event.winner == player_id)
+# ===========================================================================
+# _play_next_turn()
+# Xử lý lượt tiếp theo, gọi bot hoặc giả lập người chơi
+# ===========================================================================
+# ===========================================================================
+# _play_next_turn()
+# ✅ ĐÃ SỬA: Thêm vòng lặp cho bot để thực hiện nhiều hành động trong 1 lượt
+# ===========================================================================
+func _play_next_turn():
+	var state = BattleCore.get_game_state(room_id, human_player)
+	if state.empty() or state["status"] != "active":
+		print("🏁 Kết thúc trận.")
+		return
+
+	_print_game_state(state)
+
+	if state["turn"] == bot_player:
+		# 🔁 VÒNG LẶP: Cho phép bot thực hiện nhiều hành động
+		while true:
+			# Lấy trạng thái mới nhất
+			var current_state = BattleCore.get_game_state(room_id, bot_player)
+			if current_state.empty() or current_state["status"] != "active" or current_state["turn"] != bot_player:
+				break
+
+			var bot_result = YugiBot.play_turn(room_id, bot_player)
+			if bot_result.success:
+				print("🤖 Bot action: %s" % bot_result.action_taken)
+				print("📈 Kết quả: %s", bot_result.result["events"])
+			else:
+				print("❌ Bot thất bại: %s" % bot_result.result["errors"])
+				break
+
+			# ✅ THÊM DÒNG NÀY: Dừng 0.1s để tránh treo
+			yield(get_tree().create_timer(0.1), "timeout")
+	else:
+		# 👤 Người chơi (giả lập)
+		var actions = BattleCore.get_available_actions(room_id, human_player)
+		var action = _simulate_human_action(state, human_player, actions)
+		var result = BattleCore.submit_action(room_id, action)
+		if result["success"]:
+			print("👤 Human action: %s" % action)
+			print("📈 Kết quả: %s" , result["events"])
+		else:
+			print("❌ Human thất bại: %s" % result["errors"])
+
+	# Chờ 1 giây rồi tiếp tục
+	yield(get_tree().create_timer(1.0), "timeout")
+	_play_next_turn()
+
+# ===========================================================================
+# _simulate_human_action(state, player_id, actions)
+# Giả lập hành động cho người chơi (dựa trên heuristic đơn giản)
+# ===========================================================================
+func _simulate_human_action(state, player_id, actions):
+	# Ưu tiên: Activate spell mạnh
+	for act in actions.details:
+		if act.type == "PLAY_SPELL":
+			var effect = CardDatabase.get(act.payload["card_id"]).get("effect", "")
+			if effect in ["draw_2", "special_summon_graveyard", "destroy_all_monsters"]:
+				return _with_player(act, player_id)  # ✅ Đã có player_id
+	# Ưu tiên 2: Summon quái có ATK cao nhất
+	var best_atk = -1
+	var best_action = null
+	for act in actions.details:
+		if act.type == "PLAY_MONSTER":
+			var atk = CardDatabase.get(act.payload["card_id"]).get("atk", 0)
+			if atk > best_atk:
+				best_atk = atk
+				best_action = act
+	if best_action:
+		return _with_player(best_action, player_id)  # ✅
+	# Ưu tiên 3: Attack quái yếu nhất
+	if state["phase"] == "battle":
+		var opponent_id = _get_opponent_id(state)
+		var opponent = state["players"][opponent_id]
+		var weakest_atk = 999999
+		var weakest_zone = -1
+		for i in range(5):
+			if opponent["monster_zones"][i]:
+				var atk = CardDatabase.get(opponent["monster_zones"][i].card_id).get("atk", 0)
+				if atk < weakest_atk:
+					weakest_atk = atk
+					weakest_zone = i
+		if weakest_zone != -1:
+			for act in actions.details:
+				if act.type == "DECLARE_ATTACK" and act.payload["target_zone"] == weakest_zone:
+					return _with_player(act, player_id)  # ✅
+		# Direct attack
+		for act in actions.details:
+			if act.type == "DECLARE_ATTACK" and not act.payload.has("target_zone"):
+				return _with_player(act, player_id)  # ✅
+	# Ưu tiên 4: Set trap/spell
+	for act in actions.details:
+		if act.type in ["SET_TRAP", "SET_SPELL"]:
+			return _with_player(act, player_id)  # ✅
+	# Ưu tiên 5: Set monster
+	for act in actions.details:
+		if act.type == "SET_MONSTER":
+			return _with_player(act, player_id)  # ✅
+	# Ưu tiên 6: END_PHASE hoặc END_TURN
+	if state["phase"] == "end":
+		for act in actions.details:
+			if act.type == "END_TURN":
+				return _with_player(act, player_id)  # ✅
+		return _with_player({"type": "END_TURN", "payload": {}}, player_id)  # ✅
+	for act in actions.details:
+		if act.type == "END_PHASE":
+			return _with_player(act, player_id)  # ✅
+		if act.type == "END_TURN":
+			return _with_player(act, player_id)  # ✅
+	# Fallback
+	return _with_player({"type": "END_TURN", "payload": {}}, player_id)  # ✅
+
+func _with_player(action, player_id):
+	var new_action = action.duplicate()
+	new_action["player_id"] = player_id
+	return new_action
+
+# ===========================================================================
+# _print_game_state(state)
+# In trạng thái trận đấu để debug
+# ===========================================================================
+func _print_game_state(state):
+	var player = state["players"][human_player]
+	var opponent_id = _get_opponent_id(state)
+	var opponent = state["players"][opponent_id]
+	
+	print("=== Trạng thái trận đấu ===")
+	print("Lượt: %s | Phase: %s | Turn count: %d" % [state["turn"], state["phase"], state["current_turn_count"]])
+	print("Người chơi %s: LP=%d, Hand=%d, Deck=%d" % [human_player, player["life_points"], len(player["hand"]), len(player["deck"])])
+	for i in range(5):
+		if player["monster_zones"][i]:
+			var card = CardDatabase.get(player["monster_zones"][i].card_id)
+			print("  Monster zone %d: %s (%s, ATK=%d, DEF=%d)" % [i, card["name"], player["monster_zones"][i].position, card["atk"], card["def"]])
+		if player["spell_trap_zones"][i]:
+			var card = CardDatabase.get(player["spell_trap_zones"][i].card_id)
+			print("  Spell/Trap zone %d: %s (%s)" % [i, card["name"], player["spell_trap_zones"][i].status])
+	print("Đối thủ %s: LP=%d, Hand=%d, Deck=%d" % [opponent_id, opponent["life_points"], len(opponent["hand"]), len(opponent["deck"])])
+	for i in range(5):
+		if opponent["monster_zones"][i]:
+			var card = CardDatabase.get(opponent["monster_zones"][i].card_id)
+			print("  Opponent Monster zone %d: %s (%s, ATK=%d, DEF=%d)" % [i, card["name"], opponent["monster_zones"][i].position, card["atk"], card["def"]])
+		if opponent["spell_trap_zones"][i]:
+			var card = CardDatabase.get(opponent["spell_trap_zones"][i].card_id)
+			print("  Opponent Spell/Trap zone %d: %s (%s)" % [i, card["name"], opponent["spell_trap_zones"][i].status])
+	if not state["chain"].empty():
+		print("Chain: %s" % state["chain"])
+	if state["winner"]:
+		print("Người thắng: %s | Lý do: %s" % [state["winner"], state["win_reason"]])
+	print("==========================")
 
 
-func _on_error_received(code, message):
-	print("❌ [BOT] Lỗi: %s | %s" % [code, message])
-	_finish_test(false)
+# ===========================================================================
+# _get_opponent_id(state)
+# Lấy ID của đối thủ
+# ===========================================================================
+func _get_opponent_id(state):
+	for pid in state["players"]:
+		if pid != state["turn"]:
+			return pid
+	return null
 
 
-func _finish_test(success):
-	var status = "✅ [BOT] TEST THÀNH CÔNG!" if success else "❌ [BOT] TEST THẤT BẠI!"
-	print("==================================")
-	print(status)
-	print("==================================")
-	network_client._disconnect()
-	queue_free()
+
+
+================================================================================
+
+--- FILE: core\TrainBot.gd ---
+# ===========================================================================
+# train_agent.gd - Huấn luyện Agent học từ trận đấu Yu-Gi-Oh!
+# Dùng Agent.gd (hybrid: Q-Learning + Rule-based response)
+# ===========================================================================
+
+extends Node
+
+# Số trận để huấn luyện
+const TRAINING_GAMES = 100
+
+# Bộ bài mẫu
+var deck = [
+	"BLUE_EYES_WHITE_DRAGON",
+	"DARK_MAGICIAN",
+	"MIRROR_FORCE",
+	"GYOUKI",
+	"SACK",
+	"EFFECT_VEILER",
+	"BOOK_OF_MOON",
+	"CARD_001",
+	"CARD_002",
+	"CARD_003"
+]
+
+# ===========================================================================
+# _ready()
+# Bắt đầu huấn luyện
+# ===========================================================================
+func _ready():
+	print("🚀 Bắt đầu huấn luyện Agent cho %d trận..." % TRAINING_GAMES)
+	
+	for i in range(TRAINING_GAMES):
+		print("🎮 Trận #%d" % (i + 1))
+		_train_one_game(deck, deck)
+	
+	# Lưu model sau khi học xong
+	Agent.save_q_table()
+	print("🎉 Hoàn thành huấn luyện %d trận! Model đã được lưu." % TRAINING_GAMES)
+
+
+# ===========================================================================
+# _train_one_game(deck_a, deck_b)
+# Chạy một trận đấu giữa Agent và Bot (random)
+# ===========================================================================
+func _train_one_game(deck_a, deck_b):
+	# Khởi tạo trận đấu
+	var room_id = BattleCore.start_duel("agent", "bot", deck_a, deck_b)
+	if not room_id:
+		print("❌ Không thể khởi tạo trận đấu")
+		return
+	
+	var game_over = false
+	var current_state = BattleCore.get_game_state(room_id, "agent")
+	
+	# Vòng lặp trận đấu
+	while not game_over:
+		var game_data = BattleCore.active_duels[room_id]
+		if not game_data:
+			break
+		
+		var current_player = game_data.turn
+		
+		if current_player == "agent":
+			# Lượt của Agent
+			var available_actions = BattleCore.get_available_actions(room_id, "agent")
+			if available_actions.empty():
+				game_over = true
+				continue
+			
+			# 1. Agent chọn hành động chính
+			var action_type = Agent.get_action(current_state, "agent", available_actions)
+			var action = {
+				"player_id": "agent",
+				"type": action_type
+			}
+			
+			# 2. Điền payload (có thể mở rộng sau)
+			action.payload = _build_payload(action_type, current_state, "agent")
+			
+			# 3. Gửi hành động
+			var result = BattleCore.submit_action(room_id, action)
+			
+			# 4. Học từ kết quả
+			Agent.learn_from_result(current_state, action, result)
+			
+			# 5. Cập nhật trạng thái
+			var new_state = BattleCore.get_game_state(room_id, "agent")
+			current_state = new_state
+			
+			# 6. Xử lý sự kiện: có cần phản ứng không?
+			var response = Agent.on_event(new_state, result.events, "agent")
+			if response:
+				var response_result = BattleCore.submit_action(room_id, response)
+				# Có thể học thêm từ phản ứng
+				Agent.learn_from_result(new_state, response, response_result)
+				current_state = BattleCore.get_game_state(room_id, "agent")
+			
+			# 7. Kiểm tra kết thúc
+			if result.events.find({"type": "WIN"}) or new_state.status == "finished":
+				game_over = true
+				
+		else:
+			# Lượt của bot đối thủ (random)
+			var available = BattleCore.get_available_actions(room_id, "bot")
+			if available.empty():
+				game_over = true
+				continue
+			
+			var action_type = available[randi() % available.size()]
+			var action = {
+				"player_id": "bot",
+				"type": action_type
+			}
+			
+			# Tạo payload đơn giản
+			action.payload = _build_payload(action_type, BattleCore.get_game_state(room_id, "bot"), "bot")
+			
+			BattleCore.submit_action(room_id, action)
+		
+		# Kiểm tra trạng thái trận
+		var duel = BattleCore.active_duels.get(room_id)
+		if not duel or duel.status == "finished":
+			game_over = true
+	
+	print("✅ Trận đấu kết thúc.")
+
+
+# ===========================================================================
+# _build_payload(action_type, game_state, player_id)
+# Tạo payload hợp lệ cho hành động
+# (Có thể mở rộng thành logic chọn bài thông minh)
+# ===========================================================================
+func _build_payload(action_type, game_state, player_id):
+	var payload = {}
+	var player = game_state.players[player_id]
+	
+	match action_type:
+		"PLAY_MONSTER":
+			# Chọn quái đầu tiên trên tay
+			for card_id in player.hand:
+				if CardDatabase.exists(card_id):
+					var card = CardDatabase.get(card_id)
+					if card.type == "Monster":
+						payload.card_id = card_id
+						payload.from_zone = "hand"
+						payload.to_zone = _find_empty_zone(player.monster_zones)
+						payload.position = "face_up_attack"
+						return payload
+			return null  # Không có quái
+			
+		"SET_MONSTER", "SET_SPELL", "SET_TRAP":
+			payload.to_zone = _find_empty_zone(
+				player.spell_trap_zones if "SPELL" in action_type or "TRAP" in action_type 
+				else player.monster_zones
+			)
+			# Tìm bài phù hợp
+			for card_id in player.hand:
+				if CardDatabase.exists(card_id):
+					var card = CardDatabase.get(card_id)
+					if ("SPELL" in action_type and card.type == "Spell") or \
+					   ("TRAP" in action_type and card.type == "Trap") or \
+					   ("MONSTER" in action_type and card.type == "Monster"):
+						payload.card_id = card_id
+						return payload
+			return null
+			
+		"PLAY_SPELL", "PLAY_TRAP":
+			payload.to_zone = _find_empty_zone(player.spell_trap_zones)
+			# Tương tự như trên
+			for card_id in player.hand:
+				if CardDatabase.exists(card_id):
+					var card = CardDatabase.get(card_id)
+					if ("SPELL" in action_type and card.type == "Spell") or \
+					   ("TRAP" in action_type and card.type == "Trap"):
+						payload.card_id = card_id
+						return payload
+			return null
+			
+		"DECLARE_ATTACK":
+			# Tìm quái tấn công
+			for i in range(5):
+				var card = player.monster_zones[i]
+				if card and card.position == "face_up_attack" and not card.has("attacked_this_turn"):
+					var opp = game_state.players[_get_opponent_id(game_state, player_id)]
+					# Tìm mục tiêu
+					for j in range(5):
+						if opp.monster_zones[j]:
+							payload.attacker = card.card_id
+							payload.target = opp.monster_zones[j].card_id
+							return payload
+					# Nếu không có quái → tấn công trực tiếp
+					payload.attacker = card.card_id
+					payload.target = null
+					return payload
+			return null
+			
+		"CHANGE_POSITION":
+			for i in range(5):
+				var card = player.monster_zones[i]
+				if card and card.position == "face_up_attack":
+					payload.card_id = card.card_id
+					payload.to_position = "defense"
+					payload.face = "up"
+					return payload
+			return null
+			
+		"ACTIVATE_EFFECT":
+			# Tìm bài có thể kích hoạt
+			for zone in player.monster_zones:
+				if zone:
+					payload.card_id = zone.card_id
+					return payload
+			for zone in player.spell_trap_zones:
+				if zone and zone.status == "face_up":
+					payload.card_id = zone.card_id
+					return payload
+			return null
+			
+		"END_TURN", "END_PHASE", "DRAW_CARD", "SURRENDER":
+			# Không cần payload
+			pass
+	
+	return payload
+
+
+# ===========================================================================
+# Hàm hỗ trợ
+# ===========================================================================
+func _find_empty_zone(zones):
+	for i in range(zones.size()):
+		if zones[i] == null:
+			return i
+	return 0  # Mặc định
+
+func _get_opponent_id(game_state, player_id):
+	for pid in game_state.players.keys():
+		if pid != player_id:
+			return pid
+	return null
+
+================================================================================
+
+--- FILE: core\types\GameState.gd ---
+# res://types/GameState.gd
+class_name GameState
+
+var room_id: String
+var turn: String
+var phase: String  # "draw", "standby", "main1", "battle", "main2", "end"
+var players: Dictionary  # player_id → PlayerState
+var chain: Array = []    # Danh sách hiệu ứng đang xử lý
+var status: String = "active"
+================================================================================
+
+--- FILE: core\types\PlayerState.gd ---
+# res://types/PlayerState.gd
+class_name PlayerState
+
+var life_points: int = 8000
+var deck: Array
+var hand: Array
+var graveyard: Array
+var monster_zones: Array  # 5 ô
+var spell_trap_zones: Array  # 5 ô
+var extra_deck: Array
+var field_zone  = null
+================================================================================
+
+--- FILE: data\cards.json ---
+{
+  "BLUE_EYES_WHITE_DRAGON": {
+    "id": "BLUE_EYES_WHITE_DRAGON",
+    "name": "Blue-Eyes White Dragon",
+    "type": "monster",
+    "atk": 3000,
+    "def": 2500,
+    "level": 8,
+    "attribute": "light",
+    "effect": ""
+  },
+  "DARK_MAGICIAN": {
+    "id": "DARK_MAGICIAN",
+    "name": "Dark Magician",
+    "type": "monster",
+    "atk": 2500,
+    "def": 2100,
+    "level": 7,
+    "attribute": "dark",
+    "effect": ""
+  },
+  "SUMMONED_SKULL": {
+    "id": "SUMMONED_SKULL",
+    "name": "Summoned Skull",
+    "type": "monster",
+    "atk": 2500,
+    "def": 1200,
+    "level": 6,
+    "attribute": "dark",
+    "effect": ""
+  },
+  "GYOUKI": {
+    "id": "GYOUKI",
+    "name": "Gyouki",
+    "type": "monster",
+    "atk": 1500,
+    "def": 1000,
+    "level": 4,
+    "attribute": "dark",
+    "effect": ""
+  },
+  "POT_OF_GREED": {
+    "id": "POT_OF_GREED",
+    "name": "Pot of Greed",
+    "type": "spell",
+    "effect": "draw_2"
+  },
+  "MONSTER_REBORN": {
+    "id": "MONSTER_REBORN",
+    "name": "Monster Reborn",
+    "type": "spell",
+    "effect": "special_summon_graveyard"
+  },
+  "DARK_HOLE": {
+    "id": "DARK_HOLE",
+    "name": "Dark Hole",
+    "type": "spell",
+    "effect": "destroy_all_monsters"
+  },
+  "MIRROR_FORCE": {
+    "id": "MIRROR_FORCE",
+    "name": "Mirror Force",
+    "type": "trap",
+    "effect": "destroy_all_attackers"
+  },
+  "TRAP_HOLE": {
+    "id": "TRAP_HOLE",
+    "name": "Trap Hole",
+    "type": "trap",
+    "effect": "destroy_summoned_monster"
+  },
+  "SUIJIN": {
+    "id": "SUIJIN",
+    "name": "Suijin",
+    "type": "monster",
+    "atk": 2500,
+    "def": 2400,
+    "level": 7,
+    "attribute": "water",
+    "effect": "reduce_atk_0"
+  }
+}
+
+
 
 ================================================================================
 

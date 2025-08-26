@@ -10,7 +10,6 @@ var player_to_room = {}
 onready var network_manager = NetworkManager
 onready var auth_manager = AuthManager
 onready var game_manager = GameManager
-onready var battle_core = BattleCore
 
 func _ready():
 	auth_manager.connect("player_authenticated", self, "_on_player_authenticated")
@@ -18,14 +17,13 @@ func _ready():
 	game_manager.connect("game_started", self, "_on_game_started")
 	game_manager.connect("game_finished", self, "_on_game_finished")
 	game_manager.connect("game_event", self, "_on_game_event")
+	print("[S-SERVER] Ready")
 
 func _on_player_authenticated(player_id, token, peer_id):
-	# Optionally also send player info here if you keep a DB
-	# Main fix: AUTH_SUCCESS already sent by AuthManager
-	pass
+	pass  # AUTH_SUCCESS already sent by AuthManager
 
 func _on_message_received(player_id, message):
-	var t = str(message.get("type",""))
+	var t = str(message.get("type", ""))
 	match t:
 		"LIST_ROOMS":
 			_send_room_list(player_id)
@@ -41,62 +39,83 @@ func _on_message_received(player_id, message):
 			pass
 
 func _handle_create_room(player_id, message):
-	var mode = str(message.get("mode","pvp_1v1"))
+	var mode = str(message.get("mode", "pvp_1v1"))
 	if mode == "pve":
-		# Start PvE via GameManager if supported
-		if PvEManager and PvEManager.has_method("start_pve_game"):
-			var deck = DatabaseManager.get_deck(player_id)
-			PvEManager.start_pve_game(player_id, deck)
+		var result = game_manager.create_duel_vs_bot(player_id)
+		if not result.success:
+			network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": result.error, "message": "" })
+			return
+		var room_id = result.room_id
+		rooms[room_id] = { "player_a": player_id, "player_b": "bot_ai", "status": "playing", "duel_id": room_id }
+		player_to_room[player_id] = room_id
+		network_manager.send_message_to_player(player_id, { "type": "ROOM_CREATED", "room_id": room_id })
 		return
-	# PvP room waiting for opponent
+	
 	var room_id = "room_%d" % (OS.get_unix_time() % 100000)
 	rooms[room_id] = { "player_a": player_id, "player_b": "", "status": "waiting" }
 	player_to_room[player_id] = room_id
 	network_manager.send_message_to_player(player_id, { "type": "ROOM_CREATED", "room_id": room_id })
 
 func _handle_join_room(player_id, message):
-	var room_id = str(message.get("room_id",""))
+	var room_id = str(message.get("room_id", ""))
 	if room_id == "" or not rooms.has(room_id):
 		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_NOT_FOUND", "message": "" })
 		return
 	if rooms[room_id]["player_b"] == "" and rooms[room_id]["player_a"] != player_id:
 		rooms[room_id]["player_b"] = player_id
 		player_to_room[player_id] = room_id
-		# start duel
 		var ra = rooms[room_id]["player_a"]
 		var rb = rooms[room_id]["player_b"]
-		var deck_a = DatabaseManager.get_deck(ra)
-		var deck_b = DatabaseManager.get_deck(rb)
-		var rules = { "start_lp": 8000, "max_hand_size": 6 }
-		var duel_id = battle_core.start_duel(ra, rb, deck_a, deck_b, rules)
-		rooms[room_id]["duel_id"] = duel_id
+		var result = game_manager.create_duel(ra, rb, room_id)
+		if not result.success:
+			network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": result.error, "message": "" })
+			return
+		rooms[room_id]["duel_id"] = result.duel_id
 		rooms[room_id]["status"] = "playing"
-		network_manager.send_message_to_player(ra, { "type": "GAME_STARTED", "room_id": room_id })
-		network_manager.send_message_to_player(rb, { "type": "GAME_STARTED", "room_id": room_id })
+		game_manager.emit_signal("game_started", room_id, ra, rb)
 	else:
 		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_FULL", "message": "" })
 
 func _handle_get_state(player_id, message):
-	var room_id = str(message.get("room_id",""))
+	var room_id = str(message.get("room_id", ""))
 	if room_id == "" or not rooms.has(room_id):
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_NOT_FOUND", "message": "" })
 		return
-	var state = battle_core.get_game_state(rooms[room_id].get("duel_id",""))
-	network_manager.send_message_to_player(player_id, { "type": "GAME_STATE", "state": state })
+	var duel_id = rooms[room_id].get("duel_id", "")
+	var state = game_manager.get_game_state(duel_id, player_id)
+	var actions = game_manager.get_available_actions(duel_id, player_id)
+	network_manager.send_message_to_player(player_id, { 
+		"type": "GAME_STATE", 
+		"state": state, 
+		"available_actions": actions 
+	})
 
 func _handle_submit_action(player_id, message):
-	var room_id = str(message.get("room_id",""))
+	var room_id = str(message.get("room_id", ""))
 	var action = message.get("action", {})
 	if room_id == "" or not rooms.has(room_id):
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "ROOM_NOT_FOUND", "message": "" })
 		return
-	var duel_id = rooms[room_id].get("duel_id","")
+	var duel_id = rooms[room_id].get("duel_id", "")
 	if typeof(action) != TYPE_DICTIONARY:
+		network_manager.send_message_to_player(player_id, { "type": "ERROR", "code": "INVALID_ACTION", "message": "" })
 		return
 	action["player_id"] = player_id
-	var result = battle_core.submit_action(duel_id, action)
-	# Push result and (optionally) updated state
-	network_manager.send_message_to_player(player_id, { "type": "ACTION_RESULT", "result": result })
-	var state = battle_core.get_game_state(duel_id)
-	network_manager.send_message_to_player(player_id, { "type": "GAME_STATE", "state": state })
+	var result = game_manager.submit_action(room_id, action)
+	
+	# ✅ Gửi ACTION_RESULT cho cả phòng
+	_broadcast_to_room(room_id, { "type": "ACTION_RESULT", "result": result })
+	
+	# ✅ Gửi GAME_STATE riêng cho từng người
+	var state = game_manager.get_game_state(duel_id)
+	for pid in [rooms[room_id].get("player_a"), rooms[room_id].get("player_b")]:
+		if pid != "" and pid != "bot_ai":
+			var actions = game_manager.get_available_actions(duel_id, pid)
+			network_manager.send_message_to_player(pid, {
+				"type": "GAME_STATE",
+				"state": state,
+				"available_actions": actions
+			})
 
 func _send_room_list(player_id):
 	var list = []
@@ -104,15 +123,64 @@ func _send_room_list(player_id):
 		list.append({ "room_id": k, "status": rooms[k]["status"] })
 	network_manager.send_message_to_player(player_id, { "type": "ROOM_LIST", "rooms": list })
 
-func _on_game_started(room_id, a, b):
-	# If using GameManager signals, forward events as needed
-	pass
+func _on_game_started(room_id, player_a, player_b):
+	_broadcast_to_room(room_id, { "type": "GAME_STARTED", "room_id": room_id })
+	
+	var duel_id = rooms[room_id].get("duel_id", "")
+	var state = game_manager.get_game_state(duel_id)
+	for pid in [player_a, player_b]:
+		if pid != "" and pid != "bot_ai":
+			var actions = game_manager.get_available_actions(duel_id, pid)
+			network_manager.send_message_to_player(pid, {
+				"type": "GAME_STATE",
+				"state": state,
+				"available_actions": actions
+			})
 
 func _on_game_finished(room_id, winner, reason):
-	pass
+	_broadcast_to_room(room_id, { "type": "GAME_OVER", "winner": winner, "reason": reason })
+	if rooms.has(room_id):
+		var room = rooms[room_id]
+		for pid in [room.get("player_a", ""), room.get("player_b", "")]:
+			if pid != "" and pid != "bot_ai":
+				player_to_room.erase(pid)
+		rooms.erase(room_id)
 
 func _on_game_event(room_id, events):
-	# Broadcast to players in that room
-	for pid in player_to_room.keys():
-		if player_to_room[pid] == room_id:
-			network_manager.send_message_to_player(pid, { "type": "GAME_EVENT", "events": events })
+	_broadcast_to_room(room_id, { "type": "GAME_EVENT", "events": events })
+
+	for event in events:
+		if event.type in ["ATTACK_DECLARED", "SUMMON", "FLIP_SUMMON", "PLAY_SPELL", "SET_SPELL", "SET_MONSTER"]:
+			_broadcast_to_room(room_id, {
+				"type": "CHAIN_TRIGGERED",
+				"trigger": event,
+				"timestamp": OS.get_unix_time(),
+				"can_respond": true
+			})
+
+	var duel_id = rooms[room_id].get("duel_id", "")
+	if duel_id != "":
+		var state = game_manager.get_game_state(duel_id)
+		for pid in [rooms[room_id].get("player_a"), rooms[room_id].get("player_b")]:
+			if pid != "" and pid != "bot_ai":
+				var actions = game_manager.get_available_actions(duel_id, pid)
+				network_manager.send_message_to_player(pid, {
+					"type": "GAME_STATE",
+					"state": state,
+					"available_actions": actions
+				})
+
+# Helper to broadcast message to all players in room
+func _broadcast_to_room(room_id: String, message: Dictionary):
+	if not rooms.has(room_id):
+		print("[ServerManager] Room not found: %s" % room_id)
+		return
+	
+	var room_data = rooms[room_id]
+	var duel_id = room_data.get("duel_id", "")
+	if duel_id == "":
+		return
+	
+	for player_id in [room_data.get("player_a"), room_data.get("player_b")]:
+		if player_id != "" and player_id != "bot_ai":
+			network_manager.send_message_to_player(player_id, message)

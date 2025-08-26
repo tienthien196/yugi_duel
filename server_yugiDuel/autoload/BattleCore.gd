@@ -56,10 +56,6 @@ const ERR_INVALID_CARD = "INVALID_CARD"
 # ===========================================================================
 func start_duel(player_a_id, player_b_id, deck_a, deck_b, rules = {}):
 	var room_id: String = "duel_%d_%d" % [OS.get_unix_time(), randi() % 10000]
-
-
-
-	
 	# Validate deck
 	for card_id in deck_a + deck_b:
 		if not CardDatabase.exists(card_id):
@@ -89,6 +85,7 @@ func start_duel(player_a_id, player_b_id, deck_a, deck_b, rules = {}):
 		"current_turn_count": 1,
 		"is_first_turn": true,
 		"first_player": first_player,
+	
 		"players": {
 			player_a_id: _create_player_state(player_a_id, deck_a_copy, hand_a, start_lp),
 			player_b_id: _create_player_state(player_b_id, deck_b_copy, hand_b, start_lp)

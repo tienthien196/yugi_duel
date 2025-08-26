@@ -28,7 +28,7 @@ signal action_result_received(result)
 signal room_list_received(rooms)
 signal room_list_update(rooms)
 signal room_created(room_id)
-
+signal chain_triggered(trigger)
 signal error_received(code, message)
 
 func _ready():
@@ -94,6 +94,8 @@ remote func receive_message(message):
 	print("[NET] 📥 <- %s" % str(message))
 	var t = str(message.get("type",""))
 	match t:
+		"CHAIN_TRIGGERED":
+			emit_signal("chain_triggered", message.get("trigger", {}))
 		"AUTH_REQUEST":
 			emit_signal("auth_request", message)
 		"AUTH_SUCCESS":
