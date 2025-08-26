@@ -39,6 +39,16 @@
     "attribute": "dark",
     "effect": ""
   },
+  "SUIJIN": {
+    "id": "SUIJIN",
+    "name": "Suijin",
+    "type": "monster",
+    "atk": 2500,
+    "def": 2400,
+    "level": 7,
+    "attribute": "water",
+    "effect": "reduce_atk_0"
+  },
   "POT_OF_GREED": {
     "id": "POT_OF_GREED",
     "name": "Pot of Greed",
@@ -68,17 +78,5 @@
     "name": "Trap Hole",
     "type": "trap",
     "effect": "destroy_summoned_monster"
-  },
-  "SUIJIN": {
-    "id": "SUIJIN",
-    "name": "Suijin",
-    "type": "monster",
-    "atk": 2500,
-    "def": 2400,
-    "level": 7,
-    "attribute": "water",
-    "effect": "reduce_atk_0"
   }
 }
-
-

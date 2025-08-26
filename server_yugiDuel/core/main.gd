@@ -22,15 +22,48 @@ func _ready():
 	
 	# Tạo deck mẫu
 	var deck_a = [
-		"BLUE_EYES_WHITE_DRAGON", "BLUE_EYES_WHITE_DRAGON",
-		"POT_OF_GREED", "MONSTER_REBORN", "DARK_HOLE",
-		"SUMMONED_SKULL", "GYOUKI"
+		"BLUE_EYES_WHITE_DRAGON","BLUE_EYES_WHITE_DRAGON","BLUE_EYES_WHITE_DRAGON",
+		"DARK_MAGICIAN","DARK_MAGICIAN","DARK_MAGICIAN",
+		"SUMMONED_SKULL","SUMMONED_SKULL","SUMMONED_SKULL",
+		"GYOUKI","GYOUKI","GYOUKI","GYOUKI",
+		"SUIJIN","SUIJIN",
+
+		"POT_OF_GREED","POT_OF_GREED",
+		"MONSTER_REBORN","MONSTER_REBORN",
+		"DARK_HOLE","DARK_HOLE",
+		"MIRROR_FORCE","MIRROR_FORCE",
+		"TRAP_HOLE","TRAP_HOLE",
+
+		# thêm quái thường để đủ 40 lá
+		"GYOUKI","GYOUKI","GYOUKI","GYOUKI","GYOUKI",
+		"SUMMONED_SKULL","SUMMONED_SKULL",
+		"DARK_MAGICIAN","DARK_MAGICIAN",
+		"BLUE_EYES_WHITE_DRAGON","BLUE_EYES_WHITE_DRAGON",
+		"SUIJIN","SUIJIN"
 	]
+
+
 	var deck_b = [
-		"DARK_MAGICIAN", "DARK_MAGICIAN",
-		"MIRROR_FORCE", "TRAP_HOLE", "SUIJIN",
-		"GYOUKI", "SUMMONED_SKULL"
+		"DARK_MAGICIAN","DARK_MAGICIAN","DARK_MAGICIAN",
+		"SUMMONED_SKULL","SUMMONED_SKULL","SUMMONED_SKULL",
+		"BLUE_EYES_WHITE_DRAGON","BLUE_EYES_WHITE_DRAGON","BLUE_EYES_WHITE_DRAGON",
+		"GYOUKI","GYOUKI","GYOUKI","GYOUKI",
+		"SUIJIN","SUIJIN","SUIJIN",
+
+		"POT_OF_GREED","POT_OF_GREED",
+		"MONSTER_REBORN","MONSTER_REBORN",
+		"DARK_HOLE","DARK_HOLE",
+		"MIRROR_FORCE","MIRROR_FORCE","MIRROR_FORCE",
+		"TRAP_HOLE","TRAP_HOLE","TRAP_HOLE",
+
+		# thêm quái thường
+		"GYOUKI","GYOUKI","GYOUKI","GYOUKI","GYOUKI",
+		"SUMMONED_SKULL","SUMMONED_SKULL",
+		"DARK_MAGICIAN","DARK_MAGICIAN",
+		"BLUE_EYES_WHITE_DRAGON","BLUE_EYES_WHITE_DRAGON"
 	]
+
+
 	
 	# Khởi tạo trận đấu
 	room_id = BattleCore.start_duel(human_player, bot_player, deck_a, deck_b, {
@@ -44,6 +77,13 @@ func _ready():
 		return
 	
 	print("🎮 Trận đấu bắt đầu: %s" % room_id)
+	# ✅ log scene 
+	var duel_scene = load("res://scenes/DuelScene.tscn").instance()
+	duel_scene.room_id = room_id
+	duel_scene.player_id = "player_a"  # hoặc "bot_player" nếu muốn xem từ bot
+	add_child(duel_scene)
+
+
 	_play_next_turn()
 
 

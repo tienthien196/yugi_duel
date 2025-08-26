@@ -41,6 +41,8 @@ AuthManager="*res://autoload/AuthManager.gd"
 DatabaseManager="*res://autoload/DatabaseManager.gd"
 GameManager="*res://autoload/GameManager.gd"
 PvEManager="*res://autoload/PvEManager.gd"
+LoggerService="*res://autoload/LoggerService.gd"
+DuelAPI="*res://autoload/DuelAPI.gd"
 
 [gui]
 
